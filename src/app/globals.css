@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0a0a0b;
+  --panel: #111113;
+  --panel-2: #17171a;
+  --line: #26262b;
+  --text: #ededef;
+  --muted: #8b8b93;
+  --accent: var(--product-accent, #c8ff3d);
+  --accent-ink: #0a0a0b;
+  --danger: #ff5c5c;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui;
+  --font-mono: var(--font-geist-mono), ui-monospace;
+}
+
+html { color-scheme: dark; }
+body { background: var(--bg); color: var(--text); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+::selection { background: var(--accent); color: var(--accent-ink); }
+
+@utility input {
+  @apply w-full rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-text outline-none transition placeholder:text-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/20;
+}
+@utility btn {
+  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:opacity-50;
+}
+@utility btn-primary { @apply btn bg-accent text-accent-ink hover:brightness-110; }
+@utility btn-ghost { @apply btn border border-line text-text hover:bg-panel-2; }
+@utility btn-danger { @apply btn border border-danger/40 text-danger hover:bg-danger/10; }
+@utility card { @apply rounded-2xl border border-line bg-panel; }
