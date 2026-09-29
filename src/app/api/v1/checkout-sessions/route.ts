@@ -1,86 +1,136 @@
-import { NextResponse } from "next/server"
-import { eq } from "drizzle-orm"
+import { and, eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
-import { authenticateApiKey } from "@/lib/api-keys"
-import { apiError, serializePayment } from "@/lib/api"
-import { applicationFee } from "@/lib/fees"
-import { stripe } from "@/lib/stripe"
+import { fail, jsonResponse, withApi } from "@/lib/api"
+import { CURRENCIES, currencyExponent } from "@/lib/fees"
+import { createCheckout, NotReadyError, safeUrl } from "@/lib/payments"
+import { serializePayment } from "@/lib/api"
 
-const CURRENCIES = new Set(["usd", "eur", "gbp", "cad", "aud", "mxn"])
+/**
+ * POST /api/v1/checkout-sessions
+ *
+ * Takes either a `price` (id or `lookup_key`) or a raw `amount`, and returns a hosted
+ * checkout URL. The caller redirects the buyer there and gets a `payment.succeeded`
+ * webhook. Send an `Idempotency-Key` so a retry can't charge twice.
+ */
+export const POST = withApi(async ({ req, caller, json }) => {
+  const body = await json<{
+    amount?: number
+    price?: string
+    currency?: string
+    description?: string
+    quantity?: number
+    reference?: string
+    customer?: string
+    customer_email?: string
+    metadata?: Record<string, unknown>
+    success_url?: string
+    cancel_url?: string
+  }>()
 
-function httpsUrl(value: unknown) {
-  if (typeof value !== "string") return null
-  try {
-    const url = new URL(value)
-    return url.protocol === "https:" || (process.env.NODE_ENV !== "production" && url.protocol === "http:") ? url.toString() : null
-  } catch {
-    return null
-  }
-}
-
-// POST /api/v1/checkout-sessions — start a hosted Stripe Checkout for a one-off payment
-export async function POST(req: Request) {
-  const caller = await authenticateApiKey(req)
-  if (!caller) return apiError(401, "authentication_error", "Missing or invalid API key")
-
-  const body = await req.json().catch(() => null)
-  if (!body || typeof body !== "object") return apiError(400, "invalid_request_error", "Body must be JSON")
-
-  const amount = Number(body.amount)
-  const currency = String(body.currency ?? "usd").toLowerCase()
-  const description = typeof body.description === "string" ? body.description.trim().slice(0, 250) : ""
-  const successUrl = httpsUrl(body.success_url)
-  const cancelUrl = httpsUrl(body.cancel_url)
-  if (!Number.isInteger(amount) || amount < 50 || amount > 99_999_999)
-    return apiError(400, "invalid_request_error", "amount must be an integer in minor units (at least 50)")
-  if (!CURRENCIES.has(currency)) return apiError(400, "invalid_request_error", `Unsupported currency: ${currency}`)
-  if (!description) return apiError(400, "invalid_request_error", "description is required")
-  if (!successUrl || !cancelUrl) return apiError(400, "invalid_request_error", "success_url and cancel_url must be https URLs")
+  const site = new URL(process.env.TOLLBOOTH_SITE_URL ?? "https://tollbooth.axxes.club")
+  const successUrl = safeUrl(body.success_url) ?? new URL("/dashboard/payments", site).toString()
+  const cancelUrl = safeUrl(body.cancel_url) ?? new URL("/dashboard/payments", site).toString()
 
   const metadata: Record<string, string> = {}
   if (body.metadata && typeof body.metadata === "object") {
-    for (const [k, v] of Object.entries(body.metadata).slice(0, 20)) metadata[String(k).slice(0, 40)] = String(v).slice(0, 500)
+    for (const [k, v] of Object.entries(body.metadata).slice(0, 20)) {
+      metadata[String(k).slice(0, 40)] = String(v).slice(0, 500)
+    }
   }
-  const customerEmail = typeof body.customer_email === "string" && body.customer_email.includes("@") ? body.customer_email.trim() : null
-  const reference = typeof body.reference === "string" ? body.reference.slice(0, 200) : null
 
-  const [account] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, caller.tenantId))
-  if (!account?.chargesEnabled)
-    return apiError(409, "account_not_ready", "This workspace hasn't finished payout setup in Tollbooth yet")
+  const quantity = body.quantity === undefined ? 1 : Number(body.quantity)
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99)
+    throw fail(400, "invalid_request_error", "quantity must be a whole number between 1 and 99")
 
-  const fee = applicationFee(amount)
-  const [payment] = await db
-    .insert(schema.tollboothPayments)
-    .values({ tenantId: caller.tenantId, apiKeyId: caller.apiKeyId, amount, currency, applicationFee: fee, description, customerEmail, reference, metadata })
-    .returning()
+  // A price reference keeps the amount server-side, so a client can't choose what it pays.
+  let price: typeof schema.tollboothPrices.$inferSelect | null = null
+  if (body.price) {
+    const reference = body.price
+    const [byId, byLookup] = await Promise.all([
+      db
+        .select()
+        .from(schema.tollboothPrices)
+        .where(and(eq(schema.tollboothPrices.tenantId, caller.tenantId), eq(schema.tollboothPrices.id, reference))),
+      db
+        .select()
+        .from(schema.tollboothPrices)
+        .where(and(eq(schema.tollboothPrices.tenantId, caller.tenantId), eq(schema.tollboothPrices.lookupKey, reference))),
+    ])
+    price = byId[0] ?? byLookup[0] ?? null
+    if (!price) throw fail(404, "resource_missing", `No price matching "${reference}" in this workspace`)
+    if (!price.active) throw fail(400, "price_inactive", "That price is no longer available")
+  }
+
+  let amount = price?.amount
+  let currency = (price?.currency ?? body.currency ?? "usd").toLowerCase()
+  let description = price?.nickname ?? body.description?.trim().slice(0, 250) ?? ""
+  let priceId = price?.id ?? null
+
+  if (!price) {
+    amount = Number(body.amount)
+    if (!Number.isInteger(amount) || amount < 50 || amount > 99_999_999)
+      throw fail(400, "invalid_request_error", "amount must be an integer in minor units, at least 50")
+    if (!CURRENCIES.includes(currency as (typeof CURRENCIES)[number]))
+      throw fail(400, "invalid_request_error", `Unsupported currency "${currency}". Supported: ${CURRENCIES.join(", ")}`)
+    description = body.description?.trim().slice(0, 250) ?? ""
+    if (!description) throw fail(400, "invalid_request_error", "description is required when no price is given")
+  } else if (!description) {
+    const [product] = price.productId
+      ? await db.select().from(schema.tollboothProducts).where(eq(schema.tollboothProducts.id, price.productId))
+      : [null]
+    description = product?.name ?? "Payment"
+  }
+
+  // Resolve the customer, or create one on the fly from the email we were given.
+  let customerId: string | null = null
+  let customerEmail: string | null = null
+  if (body.customer) {
+    const [customer] = await db
+      .select()
+      .from(schema.tollboothCustomers)
+      .where(and(eq(schema.tollboothCustomers.id, body.customer), eq(schema.tollboothCustomers.tenantId, caller.tenantId)))
+    if (!customer) throw fail(404, "resource_missing", "No such customer")
+    customerId = customer.id
+    customerEmail = customer.email
+  } else if (typeof body.customer_email === "string" && body.customer_email.includes("@")) {
+    customerEmail = body.customer_email.trim().slice(0, 320)
+    const [existing] = await db
+      .select()
+      .from(schema.tollboothCustomers)
+      .where(and(eq(schema.tollboothCustomers.tenantId, caller.tenantId), eq(schema.tollboothCustomers.email, customerEmail!)))
+    if (existing) {
+      customerId = existing.id
+    } else {
+      const [created] = await db
+        .insert(schema.tollboothCustomers)
+        .values({ tenantId: caller.tenantId, email: customerEmail, metadata })
+        .returning()
+      customerId = created!.id
+    }
+  }
 
   try {
-    const session = await stripe().checkout.sessions.create(
-      {
-        mode: "payment",
-        line_items: [{ quantity: 1, price_data: { currency, unit_amount: amount, product_data: { name: description } } }],
-        customer_email: customerEmail ?? undefined,
-        success_url: successUrl,
-        cancel_url: cancelUrl,
-        client_reference_id: payment.id,
-        metadata: { tollbooth_payment_id: payment.id, tenant_id: caller.tenantId },
-        payment_intent_data: {
-          application_fee_amount: fee || undefined,
-          transfer_data: { destination: account.stripeAccountId },
-          metadata: { ...metadata, tollbooth_payment_id: payment.id },
-        },
-      },
-      { idempotencyKey: req.headers.get("idempotency-key") ?? undefined }
-    )
-    const [updated] = await db
-      .update(schema.tollboothPayments)
-      .set({ checkoutSessionId: session.id, checkoutUrl: session.url, updatedAt: new Date() })
-      .where(eq(schema.tollboothPayments.id, payment.id))
-      .returning()
-    return NextResponse.json(serializePayment(updated), { status: 201 })
+    const payment = await createCheckout({
+      tenantId: caller.tenantId,
+      mode: caller.mode,
+      apiKeyId: caller.apiKeyId,
+      amount: amount!,
+      currency,
+      description,
+      customerEmail,
+      customerId,
+      priceId,
+      reference: typeof body.reference === "string" ? body.reference.slice(0, 200) : null,
+      metadata,
+      successUrl,
+      cancelUrl,
+      quantity,
+      source: "api",
+      idempotencyKey: req.headers.get("idempotency-key"),
+    })
+    return jsonResponse(serializePayment(payment), 201)
   } catch (err) {
-    await db.update(schema.tollboothPayments).set({ status: "failed", updatedAt: new Date() }).where(eq(schema.tollboothPayments.id, payment.id))
-    const message = err instanceof Error ? err.message : "Stripe error"
-    return apiError(502, "api_error", message)
+    if (err instanceof NotReadyError) throw fail(409, "account_not_ready", err.message)
+    throw err
   }
-}
+}, { scope: "payments:write" })

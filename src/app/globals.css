@@ -1,15 +1,16 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #0a0a0b;
-  --panel: #111113;
-  --panel-2: #17171a;
-  --line: #26262b;
-  --text: #ededef;
-  --muted: #8b8b93;
-  --accent: var(--product-accent, #c8ff3d);
-  --accent-ink: #0a0a0b;
-  --danger: #ff5c5c;
+  --bg: #08090b;
+  --panel: #0e1013;
+  --panel-2: #14171c;
+  --line: #22262d;
+  --text: #e9ecf1;
+  --muted: #8b93a1;
+  --accent: var(--product-accent, #00e5a0);
+  --accent-ink: #04070a;
+  --danger: #ff6b6b;
+  --warn: #ffb454;
 }
 
 @theme inline {
@@ -22,21 +23,49 @@
   --color-accent: var(--accent);
   --color-accent-ink: var(--accent-ink);
   --color-danger: var(--danger);
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui;
-  --font-mono: var(--font-geist-mono), ui-monospace;
+  --color-warn: var(--warn);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-html { color-scheme: dark; }
-body { background: var(--bg); color: var(--text); font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
-::selection { background: var(--accent); color: var(--accent-ink); }
+html {
+  color-scheme: dark;
+  /* Anchor links shouldn't disappear under the sticky marketing header. */
+  scroll-padding-top: 6rem;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
 
 @utility input {
-  @apply w-full rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-text outline-none transition placeholder:text-muted/60 focus:border-accent focus:ring-2 focus:ring-accent/20;
+  @apply w-full rounded-lg border border-line bg-panel-2 px-3 py-2 text-sm text-text outline-none transition placeholder:text-muted/50 focus:border-accent focus:ring-2 focus:ring-accent/20;
 }
 @utility btn {
-  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:opacity-50;
+  @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50;
 }
-@utility btn-primary { @apply btn bg-accent text-accent-ink hover:brightness-110; }
-@utility btn-ghost { @apply btn border border-line text-text hover:bg-panel-2; }
-@utility btn-danger { @apply btn border border-danger/40 text-danger hover:bg-danger/10; }
-@utility card { @apply rounded-2xl border border-line bg-panel; }
+@utility btn-primary {
+  @apply btn bg-accent text-accent-ink hover:brightness-110 active:brightness-95;
+}
+@utility btn-ghost {
+  @apply btn border border-line text-text hover:bg-panel-2 hover:border-line;
+}
+@utility btn-danger {
+  @apply btn border border-danger/40 text-danger hover:bg-danger/10;
+}
+@utility card {
+  @apply rounded-2xl border border-line bg-panel;
+}
+
+/* A faint dot grid, used behind the hero. Reads as texture, not decoration. */
+@utility grid-bg {
+  background-image: radial-gradient(circle at 1px 1px, var(--line) 1px, transparent 0);
+  background-size: 32px 32px;
+}
