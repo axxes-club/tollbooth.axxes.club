@@ -4,7 +4,9 @@ import { useEffect, useId, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 
 export type SuiteApp = { key: string; name: string; description?: string; tagline?: string; url: string; color?: string; status: string; workspaceLaunch?: boolean }
-const CATALOG = "https://members.axxes.club/api/axxes/products"
+const CATALOG = process.env.NEXT_PUBLIC_AXXES_ENV === "v2"
+  ? "https://members.v2.axxes.app/api/axxes/products"
+  : "https://members.axxes.club/api/axxes/products"
 
 export function appLaunchUrl(app: SuiteApp, tenantId?: string) {
   const url = new URL(app.url)
