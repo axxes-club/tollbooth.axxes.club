@@ -29,12 +29,37 @@ export function applicationFee(amount: number): number {
 }
 
 /**
- * The slice of a previously-charged fee that a refund of `amount` hands back.
- * Refunds are proportional, so this is the fee actually returned, not a fresh charge.
+ * How much of `chargedFee` should be returned once `refundedAmount` of the original
+ * has been given back.
+ *
+ * This is a total, not a per-refund delta, and it floors. Both matter: computing each
+ * refund's share independently and rounding would let a payment split into halves
+ * return more fee than was ever charged — a $25 ticket with a 25¢ fee would hand back
+ * 26¢. Flooring keeps the value monotonic in `refundedAmount`, so the sum of the
+ * deltas taken across successive refunds can never exceed `chargedFee`.
  */
-export function refundedFee(chargedFee: number, amount: number, originalAmount: number): number {
-  if (originalAmount <= 0) return 0
-  return Math.max(0, Math.min(chargedFee, Math.round((chargedFee * amount) / originalAmount)))
+export function feeForRefundedAmount(chargedFee: number, refundedAmount: number, originalAmount: number): number {
+  if (originalAmount <= 0 || refundedAmount <= 0) return 0
+  return Math.max(0, Math.min(chargedFee, Math.floor((chargedFee * refundedAmount) / originalAmount)))
+}
+
+/**
+ * The fee to hand back for a single refund, given what has already been returned.
+ *
+ * `alreadyReturned` is what earlier refunds on this payment gave back, so the caller
+ * never returns more than the fee it originally charged.
+ */
+export function refundFeeDelta(
+  chargedFee: number,
+  alreadyReturned: number,
+  amount: number,
+  originalAmount: number,
+  refundedTotal: number
+): number {
+  const outstanding = Math.max(0, chargedFee - alreadyReturned)
+  if (outstanding === 0) return 0
+  const target = feeForRefundedAmount(chargedFee, refundedTotal, originalAmount)
+  return Math.max(0, Math.min(target - alreadyReturned, outstanding))
 }
 
 export function formatMoney(amount: number, currency: string, mode?: TbMode) {
@@ -49,3 +74,13 @@ export function formatMoney(amount: number, currency: string, mode?: TbMode) {
   // Test money is not real money; make that obvious wherever an amount is shown.
   return mode === "test" ? `${formatted} (test)` : formatted
 }
+
+/**
+ * True when a value can be a UUID.
+ *
+ * Price and product lookups accept either a real id or a `lookup_key` like
+ * `vip_ticket`. Comparing a non-UUID against a `uuid` column is a Postgres *type
+ * error*, not an empty result, so id lookups have to be guarded.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export const isUuid = (value: unknown): value is string => typeof value === "string" && UUID.test(value)

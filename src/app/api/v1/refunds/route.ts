@@ -1,7 +1,6 @@
 import { and, eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { fail, jsonResponse, listBody, paginate, serializeRefund, withApi } from "@/lib/api"
-import { refundedFee } from "@/lib/fees"
 import { createRefund, RefundError } from "@/lib/refunds"
 
 const REASONS = new Set(["duplicate", "fraudulent", "requested_by_customer", "expired_uncaptured_charge"])

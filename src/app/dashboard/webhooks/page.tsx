@@ -16,7 +16,6 @@ export default async function WebhooksPage() {
   const ctx = await requireContext()
   const canManage = ["owner", "admin"].includes(ctx.role)
   const endpoints = await getEndpoints(ctx.tenant.id)
-  const siteUrl = process.env.TOLLBOOTH_SITE_URL ?? "https://tollbooth.axxes.club"
 
   const sample = `// Verify the signature, then read the event
 const event = JSON.parse(await request.text())
@@ -81,7 +80,7 @@ if (event.type === "payment.succeeded") {
 
         {canManage && (
           <div className="space-y-4">
-            <EndpointForm events={[...WEBHOOK_EVENTS]} siteUrl={siteUrl} />
+            <EndpointForm events={[...WEBHOOK_EVENTS]} />
           </div>
         )}
       </div>

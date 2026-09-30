@@ -2,6 +2,7 @@ import { and, eq, inArray } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { fail, jsonResponse, listBody, paginate, serializeLink, withApi } from "@/lib/api"
 import { safeUrl } from "@/lib/payments"
+import { isUuid } from "@/lib/fees"
 import { uniqueLinkSlug } from "@/lib/slugs"
 
 /** GET /api/v1/links — your no-code checkout pages, newest first. */
@@ -28,10 +29,12 @@ export const POST = withApi(async ({ caller, json }) => {
 
   // A link can reference a price by id or by its short lookup_key.
   const [byId, byLookup] = await Promise.all([
-    db
-      .select()
-      .from(schema.tollboothPrices)
-      .where(and(eq(schema.tollboothPrices.tenantId, caller.tenantId), eq(schema.tollboothPrices.id, body.price!))),
+    isUuid(body.price)
+      ? db
+          .select()
+          .from(schema.tollboothPrices)
+          .where(and(eq(schema.tollboothPrices.tenantId, caller.tenantId), eq(schema.tollboothPrices.id, body.price!)))
+      : Promise.resolve([]),
     db
       .select()
       .from(schema.tollboothPrices)

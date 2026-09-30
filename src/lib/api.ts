@@ -7,7 +7,8 @@ import { db, schema } from "@/lib/db"
 import { authenticateApiKey, scopeSatisfied, type ApiCaller, type Scope } from "@/lib/api-keys"
 import { rateLimit, RATE_LIMITS } from "@/lib/rate-limit"
 import { describeStripeError } from "@/lib/stripe"
-import { withIdempotency, type IdempotencyGuard } from "@/lib/idempotency"
+import { isUuid } from "@/lib/fees"
+import { IdempotencyError, IdempotencyInProgressError, withIdempotency, type IdempotencyGuard } from "@/lib/idempotency"
 
 type Row<Table extends keyof typeof schema> = typeof schema[Table] extends { $inferSelect: infer R } ? R : never
 type PaymentRow = Row<"tollboothPayments">
@@ -88,6 +89,8 @@ export function withApi<P = Record<string, never>>(
     const requestId = req.headers.get("x-request-id") ?? `req_${randomUUID().replaceAll("-", "").slice(0, 24)}`
     const url = new URL(req.url)
     const idemKey = req.headers.get("idempotency-key")
+    // Declared out here so the catch can attach them to an error response too.
+    let rateHeaders: Record<string, string> | undefined
 
     try {
       if (options.auth === false) {
@@ -108,13 +111,20 @@ export function withApi<P = Record<string, never>>(
           "retry-after": String(Math.max(1, Math.ceil((limit.resetAt - Date.now()) / 1000))),
         })
       }
-      const rateHeaders = { "x-ratelimit-limit": String(limit.limit), "x-ratelimit-remaining": String(limit.remaining) }
+      rateHeaders = { "x-ratelimit-limit": String(limit.limit), "x-ratelimit-remaining": String(limit.remaining) }
 
       const params = ((await route?.params) ?? ({} as P)) as P
+      // Path params are compared against uuid columns. A non-uuid is a Postgres type
+      // error, so reject it here as the 404 it actually means.
+      for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+        if (key === "id" || key.endsWith("Id")) {
+          if (!isUuid(value)) throw fail(404, "resource_missing", `No such ${key === "id" ? "resource" : key.replace(/Id$/, "").toLowerCase()}`)
+        }
+      }
       const run = (idem: IdempotencyGuard | null) =>
         fn({ req, url, params, requestId, caller, json: jsonReader(req), idempotency: idem }).then((res) => {
           res.headers.set("x-request-id", requestId)
-          for (const [k, v] of Object.entries(rateHeaders)) res.headers.set(k, v)
+          for (const [k, v] of Object.entries(rateHeaders ?? {})) res.headers.set(k, v)
           return res
         })
 
@@ -128,35 +138,51 @@ export function withApi<P = Record<string, never>>(
         path: url.pathname,
         requestHash: await requestFingerprint(req),
         requestId,
+        headers: rateHeaders,
         run: async () => {
           const res = await run(null)
           return { status: res.status, body: await res.clone().json().catch(() => ({})) }
         },
       })
     } catch (err) {
-      return errorResponse(err, requestId)
+      return errorResponse(err, requestId, rateHeaders)
     }
   }
 }
 
-function errorResponse(err: unknown, requestId: string) {
+function errorResponse(err: unknown, requestId: string, headers?: Record<string, string>) {
+  // The first attempt with this key is still running. 409 with Retry-After tells the
+  // client to come back, rather than leaving it guessing whether it was charged.
+  if (err instanceof IdempotencyInProgressError) {
+    return NextResponse.json({ error: { type: "idempotent_request_in_progress", message: err.message, request_id: requestId } }, {
+      status: 409,
+      headers: jsonHeaders(requestId, { ...headers, "retry-after": "1" }),
+    })
+  }
+  // A reused key with a different body is the caller's mistake, not our outage.
+  if (err instanceof IdempotencyError) {
+    return NextResponse.json({ error: { type: "invalid_request_error", message: err.message, request_id: requestId } }, {
+      status: 400,
+      headers: jsonHeaders(requestId),
+    })
+  }
   if (err instanceof ApiError) {
     return NextResponse.json({ error: { type: err.type, message: err.message, request_id: requestId } }, {
       status: err.status,
-      headers: jsonHeaders(requestId, err.headers),
+      headers: jsonHeaders(requestId, { ...headers, ...err.headers }),
     })
   }
   const stripe = describeStripeError(err)
   if (stripe.code !== "api_error") {
     return NextResponse.json({ error: { type: stripe.code, message: stripe.message, request_id: requestId } }, {
       status: stripe.status,
-      headers: jsonHeaders(requestId),
+      headers: jsonHeaders(requestId, headers),
     })
   }
   console.error(`[tollbooth] ${requestId}`, err)
   return NextResponse.json(
     { error: { type: "api_error", message: "Something went wrong on our side. Quote this request id if you contact support.", request_id: requestId } },
-    { status: 500, headers: jsonHeaders(requestId) }
+    { status: 500, headers: jsonHeaders(requestId, headers) }
   )
 }
 
@@ -391,6 +417,8 @@ export async function paginate(
   const conditions: (SQL | undefined)[] = [eq(cols.tenantId!, tenantId), ...extra]
 
   if (opts.startingAfter) {
+    // `id` is a uuid column; anything else is a type error, not a miss.
+    if (!isUuid(opts.startingAfter)) throw fail(400, "invalid_request_error", "starting_after must be a record id")
     const [cursor] = await db
       .select({ createdAt: cols.createdAt! })
       .from(table)

@@ -267,7 +267,7 @@ await tollbooth.checkout.create({ price: "vip_ticket" })`}</Code>
           </Endpoint>
           <Endpoint method="GET" path="/payments">
             <div>
-              <Param name="status" type="string">Comma-separated. One of the statuses below.</Param>
+              <Param name="status" type="string">One status, or several comma-separated to match any of them.</Param>
               <Param name="customer" type="string">Filter by customer id.</Param>
               <Param name="reference" type="string">Filter by your own order id.</Param>
               <Param name="mode" type="string">`live` or `test`.</Param>
@@ -435,6 +435,8 @@ await tollbooth.checkout.create({ price: "vip_ticket" })`}</Code>
               ["404", "resource_missing", "No such object in this workspace."],
               ["409", "account_not_ready", "Finish payout setup before taking payments."],
               ["409", "lookup_key_taken", "That lookup key is already in use."],
+              ["409", "idempotent_request_in_progress", "An identical request with the same key is still running. Retry shortly; the `retry-after` header says how long."],
+              ["409", "refund_conflict", "The payment changed while the refund was being prepared. Fetch it again and refund what's actually left."],
               ["429", "rate_limit_exceeded", "Slow down. Includes a `retry-after` header."],
               ["502", "api_error", "Our payment provider rejected or couldn't complete the request."],
             ] as const).map(([status, type, meaning]) => (
@@ -452,7 +454,13 @@ await tollbooth.checkout.create({ price: "vip_ticket" })`}</Code>
           </p>
           <p className="mt-3 text-muted">
             Reusing a key with a <em>different</em> body is rejected with a <code className="font-mono">400</code> rather than silently
-            replayed — that's a confused retry loop, and you'd rather hear about it than be charged twice. Keys are held for an hour.
+            replayed — that's a confused retry loop, and you'd rather hear about it than be charged twice. Keys are held for an
+            hour.
+          </p>
+          <p className="mt-3 text-sm text-muted">
+            If two identical requests arrive at the same moment, the second waits for the first to finish and returns its response
+            rather than charging again — the race is exactly what this header exists for. It only gives up with a{" "}
+            <code className="font-mono text-text">409</code> if the first is still running after five seconds.
           </p>
         </section>
 

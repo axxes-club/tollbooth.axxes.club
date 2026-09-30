@@ -158,7 +158,7 @@ export class TollboothError extends Error {
   status: number;
   type: string;
   requestId?: string;
-  /** True when the same request could succeed if retried. */
+  /** True when the same request could succeed if retried (includes a 409 whose request is still in flight). */
   readonly retryable: boolean;
   constructor(message: string, info?: { status?: number; type?: string; requestId?: string });
 }
@@ -193,28 +193,28 @@ export declare class Tollbooth {
     list(params?: { payment_id?: string; limit?: number }): Promise<List<Refund>>;
   };
   readonly customers: {
-    create(params: { email: string; name?: string; phone?: string; metadata?: Record<string, string> }): Promise<Customer>;
+    create(params: { email: string; name?: string; phone?: string; metadata?: Record<string, string> }, options?: { idempotencyKey?: string }): Promise<Customer>;
     retrieve(params: { id: string }): Promise<Customer>;
     list(params?: { email?: string; q?: string; limit?: number }): Promise<List<Customer>>;
     update(params: { id: string; name?: string; phone?: string; metadata?: Record<string, string> }): Promise<Customer>;
   };
   readonly products: {
-    create(params: { name: string; description?: string; metadata?: Record<string, string> }): Promise<Product>;
+    create(params: { name: string; description?: string; metadata?: Record<string, string> }, options?: { idempotencyKey?: string }): Promise<Product>;
     retrieve(params: { id: string }): Promise<Product>;
     list(params?: { limit?: number }): Promise<List<Product>>;
   };
   readonly prices: {
-    create(params: { product?: string; amount: number; currency?: Currency; nickname?: string; lookup_key?: string }): Promise<Price>;
+    create(params: { product?: string; amount: number; currency?: Currency; nickname?: string; lookup_key?: string }, options?: { idempotencyKey?: string }): Promise<Price>;
     retrieve(params: { id: string }): Promise<Price>;
     list(params?: { product?: string; limit?: number }): Promise<List<Price>>;
   };
   readonly links: {
-    create(params: { price: string; name?: string; slug?: string; success_url?: string; cancel_url?: string; allow_quantity?: boolean }): Promise<PaymentLink>;
+    create(params: { price: string; name?: string; slug?: string; success_url?: string; cancel_url?: string; allow_quantity?: boolean }, options?: { idempotencyKey?: string }): Promise<PaymentLink>;
     retrieve(params: { id: string }): Promise<PaymentLink>;
     list(params?: { limit?: number }): Promise<List<PaymentLink>>;
   };
   readonly webhooks: {
-    create(params: { url: string; events?: string[]; description?: string }): Promise<WebhookEndpoint & { secret: string }>;
+    create(params: { url: string; events?: string[]; description?: string }, options?: { idempotencyKey?: string }): Promise<WebhookEndpoint & { secret: string }>;
     retrieve(params: { id: string }): Promise<WebhookEndpoint>;
     list(params?: { limit?: number }): Promise<List<WebhookEndpoint>>;
     remove(params: { id: string }): Promise<{ object: "webhook_endpoint"; id: string; deleted: true }>;

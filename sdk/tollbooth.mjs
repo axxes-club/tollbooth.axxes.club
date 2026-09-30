@@ -30,9 +30,15 @@ export class TollboothError extends Error {
     this.requestId = info.requestId
   }
 
-  /** True when retrying the same request could plausibly succeed. */
+  /**
+   * True when retrying the same request could plausibly succeed.
+   *
+   * A 409 `idempotent_request_in_progress` means an identical request with the same
+   * key is still running; its response is the correct one, so backing off and asking
+   * again is the right move rather than an error.
+   */
   get retryable() {
-    return this.status === 0 || this.status === 429 || this.status >= 500
+    return this.status === 0 || this.status === 429 || this.status >= 500 || this.type === "idempotent_request_in_progress"
   }
 }
 
@@ -133,7 +139,7 @@ export class Tollbooth {
 
   get payments() {
     return {
-      /** @param {{ id: string }} params */
+      /** @param {{ id: string }} params * @param {{ idempotencyKey?: string }} [options] */
       retrieve: ({ id }) => this.request(`/payments/${encodeURIComponent(id)}`),
       /**
        * @param {{ limit?: number, starting_after?: string, status?: string, customer?: string, reference?: string, mode?: "live"|"test" }} [params]
@@ -149,7 +155,7 @@ export class Tollbooth {
        * @param {{ idempotencyKey?: string }} [options]
        */
       create: (params, options) => this.request("/refunds", { method: "POST", body: params, idempotencyKey: options?.idempotencyKey }),
-      /** @param {{ id: string }} params */
+      /** @param {{ id: string }} params * @param {{ idempotencyKey?: string }} [options] */
       retrieve: ({ id }) => this.request(`/refunds/${encodeURIComponent(id)}`),
       /** @param {{ payment_id?: string, limit?: number }} [params] */
       list: (params = {}) => this.request("/refunds", { query: params }),
@@ -158,22 +164,22 @@ export class Tollbooth {
 
   get customers() {
     return {
-      /** @param {{ email: string, name?: string, phone?: string, metadata?: Record<string,string> }} params */
-      create: (params) => this.request("/customers", { method: "POST", body: params }),
-      /** @param {{ id: string }} params */
+      /** @param {{ email: string, name?: string, phone?: string, metadata?: Record<string,string> }} params * @param {{ idempotencyKey?: string }} [options] */
+      create: (params, options) => this.request("/customers", { method: "POST", body: params, idempotencyKey: options?.idempotencyKey }),
+      /** @param {{ id: string }} params * @param {{ idempotencyKey?: string }} [options] */
       retrieve: ({ id }) => this.request(`/customers/${encodeURIComponent(id)}`),
       /** @param {{ email?: string, q?: string, limit?: number }} [params] */
       list: (params = {}) => this.request("/customers", { query: params }),
-      /** @param {{ id: string, name?: string, phone?: string, metadata?: Record<string,string> }} params */
+      /** @param {{ id: string, name?: string, phone?: string, metadata?: Record<string,string> }} params * @param {{ idempotencyKey?: string }} [options] */
       update: ({ id, ...params }) => this.request(`/customers/${encodeURIComponent(id)}`, { method: "PATCH", body: params }),
     }
   }
 
   get products() {
     return {
-      /** @param {{ name: string, description?: string, metadata?: Record<string,string> }} params */
-      create: (params) => this.request("/products", { method: "POST", body: params }),
-      /** @param {{ id: string }} params */
+      /** @param {{ name: string, description?: string, metadata?: Record<string,string> }} params * @param {{ idempotencyKey?: string }} [options] */
+      create: (params, options) => this.request("/products", { method: "POST", body: params, idempotencyKey: options?.idempotencyKey }),
+      /** @param {{ id: string }} params * @param {{ idempotencyKey?: string }} [options] */
       retrieve: ({ id }) => this.request(`/products/${encodeURIComponent(id)}`),
       /** @param {{ limit?: number }} [params] */
       list: (params = {}) => this.request("/products", { query: params }),
@@ -182,9 +188,9 @@ export class Tollbooth {
 
   get prices() {
     return {
-      /** @param {{ product?: string, amount: number, currency?: string, nickname?: string, lookup_key?: string }} params */
-      create: (params) => this.request("/prices", { method: "POST", body: params }),
-      /** @param {{ id: string }} params */
+      /** @param {{ product?: string, amount: number, currency?: string, nickname?: string, lookup_key?: string }} params * @param {{ idempotencyKey?: string }} [options] */
+      create: (params, options) => this.request("/prices", { method: "POST", body: params, idempotencyKey: options?.idempotencyKey }),
+      /** @param {{ id: string }} params * @param {{ idempotencyKey?: string }} [options] */
       retrieve: ({ id }) => this.request(`/prices/${encodeURIComponent(id)}`),
       /** @param {{ product?: string, limit?: number }} [params] */
       list: (params = {}) => this.request("/prices", { query: params }),
@@ -193,9 +199,9 @@ export class Tollbooth {
 
   get links() {
     return {
-      /** @param {{ price: string, name?: string, slug?: string, success_url?: string, cancel_url?: string, allow_quantity?: boolean }} params */
-      create: (params) => this.request("/links", { method: "POST", body: params }),
-      /** @param {{ id: string }} params */
+      /** @param {{ price: string, name?: string, slug?: string, success_url?: string, cancel_url?: string, allow_quantity?: boolean }} params * @param {{ idempotencyKey?: string }} [options] */
+      create: (params, options) => this.request("/links", { method: "POST", body: params, idempotencyKey: options?.idempotencyKey }),
+      /** @param {{ id: string }} params * @param {{ idempotencyKey?: string }} [options] */
       retrieve: ({ id }) => this.request(`/links/${encodeURIComponent(id)}`),
       /** @param {{ limit?: number }} [params] */
       list: (params = {}) => this.request("/links", { query: params }),
@@ -204,15 +210,15 @@ export class Tollbooth {
 
   get webhooks() {
     return {
-      /** @param {{ url: string, events?: string[], description?: string }} params */
-      create: (params) => this.request("/webhook-endpoints", { method: "POST", body: params }),
-      /** @param {{ id: string }} params */
+      /** @param {{ url: string, events?: string[], description?: string }} params * @param {{ idempotencyKey?: string }} [options] */
+      create: (params, options) => this.request("/webhook-endpoints", { method: "POST", body: params, idempotencyKey: options?.idempotencyKey }),
+      /** @param {{ id: string }} params * @param {{ idempotencyKey?: string }} [options] */
       retrieve: ({ id }) => this.request(`/webhook-endpoints/${encodeURIComponent(id)}`),
       /** @param {{ limit?: number }} [params] */
       list: (params = {}) => this.request("/webhook-endpoints", { query: params }),
-      /** @param {{ id: string }} params */
+      /** @param {{ id: string }} params * @param {{ idempotencyKey?: string }} [options] */
       remove: ({ id }) => this.request(`/webhook-endpoints/${encodeURIComponent(id)}`, { method: "DELETE" }),
-      /** @param {{ id: string, status?: "delivered" | "failed" | "pending", limit?: number }} params */
+      /** @param {{ id: string, status?: "delivered" | "failed" | "pending", limit?: number }} params * @param {{ idempotencyKey?: string }} [options] */
       deliveries: ({ id, ...params }) => this.request(`/webhook-endpoints/${encodeURIComponent(id)}/deliveries`, { query: params }),
     }
   }

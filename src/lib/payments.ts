@@ -1,25 +1,47 @@
 import "server-only"
 import { and, eq, sql } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
-import { applicationFee, currencyExponent, netPayout, refundedFee } from "@/lib/fees"
+import { applicationFee } from "@/lib/fees"
 import { stripe } from "@/lib/stripe"
-import { emit, emitPayment } from "@/lib/webhooks"
+import { emitPayment } from "@/lib/webhooks"
 import type { TbAccount, TbMode, TbPayment } from "@/lib/db/schema/tollbooth"
 
-/** Stripe expires an unpaid Checkout session after 24 hours by default. */
-export const CHECKOUT_TTL_SECONDS = 60 * 60 * 24
+/**
+ * How long a checkout stays payable.
+ *
+ * Stripe's documented maximum for `expires_at` is 24 hours, and a value sitting
+ * exactly on that boundary is fragile across API changes. A few minutes of margin
+ * keeps the session alive for effectively the same period without ever tripping the
+ * limit, which would fail the whole charge.
+ */
+export const CHECKOUT_TTL_SECONDS = 60 * 60 * 24 - 300
 
+/**
+ * Loopback hosts, where plain http is fine because nothing leaves the machine.
+ * Everything else must be https.
+ */
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1", "0.0.0.0"])
+
+/**
+ * Validates a caller-supplied URL.
+ *
+ * The rule is deliberately based on the host rather than `NODE_ENV`: a check that
+ * only fires when `NODE_ENV` is exactly "production" silently allows plaintext
+ * everywhere else — preview deploys, a misconfigured box, a test run. For a webhook
+ * endpoint that means posting payment details over http, and it lets a caller aim the
+ * gateway at a service on the internal network.
+ */
 export function safeUrl(value: unknown): string | null {
   if (typeof value !== "string" || !value) return null
+  let url: URL
   try {
-    const url = new URL(value)
-    if (url.protocol === "https:") return url.toString()
-    // Plain http is only acceptable on a developer machine, never in production.
-    if (url.protocol === "http:" && process.env.NODE_ENV !== "production") return url.toString()
-    return null
+    url = new URL(value)
   } catch {
     return null
   }
+  if (url.protocol === "https:") return url.toString()
+  if (url.protocol === "http:" && LOOPBACK.has(url.hostname.toLowerCase())) return url.toString()
+  return null
 }
 
 export class NotReadyError extends Error {
@@ -261,4 +283,3 @@ export async function markTerminal(paymentId: string, status: "failed" | "expire
   return updated
 }
 
-export { netPayout, refundedFee, currencyExponent, emit }
