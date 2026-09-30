@@ -1,17 +1,28 @@
 import { product } from "@/product.config"
 
-export function Logo({ size = "md" }: { size?: "md" | "lg" }) {
+/**
+ * A toll gate: a post with a raised barrier. It's the one idea the product is named
+ * after, and it reads at 16px, which a letter in a rounded square never does.
+ */
+function Mark({ size = 28 }: { size?: number }) {
   return (
-    <div className="flex items-center gap-2.5">
-      <span
-        className={`grid place-items-center rounded-lg bg-accent font-mono font-bold text-accent-ink ${size === "lg" ? "size-10 text-lg" : "size-7 text-sm"}`}
-      >
-        {product.name[0]}
-      </span>
+    <svg width={size} height={size} viewBox="0 0 28 28" fill="none" aria-hidden className="shrink-0">
+      <rect width="28" height="28" rx="7" fill="var(--accent)" />
+      <path d="M9 20V8.5" stroke="var(--accent-ink)" strokeWidth="2" strokeLinecap="round" />
+      <path d="M9 9.5L19.5 14L9 18.5V9.5Z" fill="var(--accent-ink)" />
+    </svg>
+  )
+}
+
+export function Logo({ size = "md" }: { size?: "md" | "lg" }) {
+  const large = size === "lg"
+  return (
+    <span className="flex items-center gap-2.5">
+      <Mark size={large ? 34 : 28} />
       <span className="leading-tight">
-        <span className={`block font-semibold tracking-tight ${size === "lg" ? "text-xl" : "text-[15px]"}`}>{product.name}</span>
+        <span className={`block font-semibold tracking-tight ${large ? "text-xl" : "text-[15px]"}`}>{product.name}</span>
         <span className="block font-mono text-[10px] uppercase tracking-[0.2em] text-muted">by AXXES</span>
       </span>
-    </div>
+    </span>
   )
 }

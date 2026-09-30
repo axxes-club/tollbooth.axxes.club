@@ -6,8 +6,8 @@ export type Product = {
   tagline: string
   /** Brand accent (CSS color). */
   accent: string
-  /** Extra top-level pages, listed above resources. */
-  nav?: { href: string; label: string }[]
+  /** Extra top-level pages, listed above resources. `group` renders a sidebar heading. */
+  nav?: { href: string; label: string; group?: string }[]
   resources: Resource[]
 }
 

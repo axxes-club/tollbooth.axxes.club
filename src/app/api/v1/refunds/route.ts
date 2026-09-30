@@ -1,39 +1,49 @@
-import { NextResponse } from "next/server"
 import { and, eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
-import { authenticateApiKey } from "@/lib/api-keys"
-import { apiError, serializePayment } from "@/lib/api"
-import { stripe } from "@/lib/stripe"
+import { fail, jsonResponse, listBody, paginate, serializeRefund, withApi } from "@/lib/api"
+import { refundedFee } from "@/lib/fees"
+import { createRefund, RefundError } from "@/lib/refunds"
 
-// POST /api/v1/refunds { payment_id, amount? } — full refund unless amount is given
-export async function POST(req: Request) {
-  const caller = await authenticateApiKey(req)
-  if (!caller) return apiError(401, "authentication_error", "Missing or invalid API key")
+const REASONS = new Set(["duplicate", "fraudulent", "requested_by_customer", "expired_uncaptured_charge"])
 
-  const body = await req.json().catch(() => null)
-  const [payment] = await db.select().from(schema.tollboothPayments)
-    .where(and(eq(schema.tollboothPayments.id, String(body?.payment_id ?? "")), eq(schema.tollboothPayments.tenantId, caller.tenantId))).catch(() => [])
-  if (!payment) return apiError(404, "resource_missing", "No such payment")
-  if (!payment.paymentIntentId || !["succeeded", "partially_refunded"].includes(payment.status))
-    return apiError(400, "invalid_request_error", "Only completed payments can be refunded")
-
-  const remaining = payment.amount - payment.amountRefunded
-  const amount = body?.amount === undefined ? remaining : Number(body.amount)
-  if (!Number.isInteger(amount) || amount < 1 || amount > remaining)
-    return apiError(400, "invalid_request_error", `amount must be between 1 and ${remaining}`)
+/**
+ * POST /api/v1/refunds
+ *
+ * Refunds `payment_id`, in full by default or `amount` for a partial one. The
+ * slice of Tollbooth's fee that covered the refunded money is returned to you
+ * automatically, so a refund never costs you the fee on top.
+ */
+export const POST = withApi(async ({ req, caller, json }) => {
+  const body = await json<{ payment_id?: string; amount?: number; reason?: string; note?: string }>()
+  if (!body.payment_id) throw fail(400, "invalid_request_error", "payment_id is required")
+  if (body.reason && !REASONS.has(body.reason))
+    throw fail(400, "invalid_request_error", `reason must be one of: ${[...REASONS].join(", ")}`)
 
   try {
-    await stripe().refunds.create(
-      { payment_intent: payment.paymentIntentId, amount, reverse_transfer: true, refund_application_fee: true },
-      { idempotencyKey: req.headers.get("idempotency-key") ?? undefined }
-    )
+    const refund = await createRefund({
+      tenantId: caller.tenantId,
+      apiKeyId: caller.apiKeyId,
+      paymentId: body.payment_id,
+      amount: body.amount,
+      reason: body.reason ?? null,
+      note: typeof body.note === "string" ? body.note.slice(0, 500) : null,
+      createdByKind: "api",
+      idempotencyKey: req.headers.get("idempotency-key"),
+    })
+    return jsonResponse(serializeRefund(refund), 201)
   } catch (err) {
-    return apiError(502, "api_error", err instanceof Error ? err.message : "Stripe error")
+    if (err instanceof RefundError) throw fail(err.status, err.type, err.message)
+    throw err
   }
+}, { scope: "refunds:write" })
 
-  const refunded = payment.amountRefunded + amount
-  const [updated] = await db.update(schema.tollboothPayments)
-    .set({ amountRefunded: refunded, status: refunded >= payment.amount ? "refunded" : "partially_refunded", updatedAt: new Date() })
-    .where(eq(schema.tollboothPayments.id, payment.id)).returning()
-  return NextResponse.json(serializePayment(updated))
-}
+/** GET /api/v1/refunds — every refund, newest first. Filter with `payment_id`. */
+export const GET = withApi(async ({ url, caller }) => {
+  const paymentId = url.searchParams.get("payment_id")
+  const { data, hasMore } = await paginate("refunds", caller.tenantId, {
+    limit: Number(url.searchParams.get("limit")) || 20,
+    startingAfter: url.searchParams.get("starting_after"),
+  }, paymentId ? [eq(schema.tollboothRefunds.paymentId, paymentId)] : [])
+
+  return jsonResponse(listBody(data.map(serializeRefund), hasMore))
+}, { scope: "payments:read" })
