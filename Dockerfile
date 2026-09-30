@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-cert
   && rm -rf /var/lib/apt/lists/*
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN if [ -f package-lock.json ]; then npm ci; \
+RUN if [ -f package-lock.json ]; then npm ci || npm install --no-audit --no-fund; \
     else corepack enable && pnpm install --frozen-lockfile; fi
 RUN mkdir -p public && if [ -d prisma ]; then npx prisma generate; fi
 RUN if [ -f package-lock.json ]; then npm run build; else pnpm run build; fi
