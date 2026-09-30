@@ -15,6 +15,20 @@ const ZERO_DECIMAL = new Set(["jpy"])
 export const currencyExponent = (currency: string) => (ZERO_DECIMAL.has(currency.toLowerCase()) ? 0 : 2)
 export const minimumCharge = (currency: string) => (currencyExponent(currency) === 0 ? 50 : 50)
 
+/** Converts human-entered major units without floating-point rounding. */
+export function parseMoney(input: string, currency: string): number | null {
+  const value = input.trim()
+  if (!/^\d+(?:\.\d+)?$/.test(value) || value.length > 32) return null
+  const exponent = currencyExponent(currency)
+  const [whole, fraction = ""] = value.split(".")
+  if (fraction.length > exponent) return null
+  const minor = BigInt(whole) * BigInt(10 ** exponent) + BigInt(fraction.padEnd(exponent, "0") || "0")
+  return minor <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(minor) : null
+}
+
+export const moneyInputValue = (amount: number, currency: string) =>
+  (amount / 10 ** currencyExponent(currency)).toFixed(currencyExponent(currency))
+
 export const feeDescription = () =>
   `${(FEE_BPS / 100).toFixed(FEE_BPS % 100 ? 2 : 0)}%${FEE_FIXED ? ` + ${FEE_FIXED}¢` : ""}`
 

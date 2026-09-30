@@ -4,6 +4,7 @@ import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { serializePayment, serializeRefund } from "@/lib/api"
 import type { TbMode, TbPayment } from "@/lib/db/schema/tollbooth"
+import { postWebhook } from "@/lib/webhook-http"
 
 /**
  * The events a merchant can subscribe to. The list is deliberately short: a payment
@@ -27,6 +28,7 @@ export type WebhookEventType = (typeof WEBHOOK_EVENTS)[number]
 const MAX_ATTEMPTS = 6
 const RETRY_DELAYS_MS = [0, 30_000, 2 * 60_000, 10 * 60_000, 60 * 60_000, 6 * 60 * 60_000]
 const REQUEST_TIMEOUT_MS = 10_000
+const DELIVERY_LEASE_MS = 60_000
 
 export type WebhookEvent = {
   id: string
@@ -35,6 +37,7 @@ export type WebhookEvent = {
   mode: TbMode
   data: { object: Record<string, unknown> }
   previous_attributes?: { status: string }
+  test?: boolean
 }
 
 // ------------------------------------------------------------------- signing
@@ -124,25 +127,29 @@ export const emitRefund = (refund: Parameters<typeof serializeRefund>[0], paymen
  * backoff, up to MAX_ATTEMPTS, after which the endpoint is flagged as failing.
  */
 export async function deliver(deliveryId: string) {
-  const [row] = await db.select().from(schema.tollboothWebhookDeliveries).where(eq(schema.tollboothWebhookDeliveries.id, deliveryId))
+  const [row] = await db.update(schema.tollboothWebhookDeliveries)
+    .set({ status: "processing", nextAttemptAt: sql`date_trunc('milliseconds', now()) + ${DELIVERY_LEASE_MS} * interval '1 millisecond'` })
+    .where(and(eq(schema.tollboothWebhookDeliveries.id, deliveryId), deliveryDue()))
+    .returning()
   if (!row) return null
+  const lease = row.nextAttemptAt!
   const [endpoint] = await db.select().from(schema.tollboothWebhookEndpoints).where(eq(schema.tollboothWebhookEndpoints.id, row.endpointId))
-  if (!endpoint) return null
+  if (!endpoint || !endpoint.enabled) {
+    await db.update(schema.tollboothWebhookDeliveries).set({ status: "failed", nextAttemptAt: null, error: "Endpoint is paused or removed" })
+      .where(and(eq(schema.tollboothWebhookDeliveries.id, row.id), eq(schema.tollboothWebhookDeliveries.nextAttemptAt, lease)))
+    return null
+  }
 
   const body = JSON.stringify(row.payload ?? {})
   const { header } = signPayload(endpoint.secret, body)
   const attempt = row.attempts + 1
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
   let status: number | null = null
   let responseBody: string | null = null
   let error: string | null = null
 
   try {
-    const res = await fetch(endpoint.url, {
-      method: "POST",
-      headers: {
+    const res = await postWebhook(endpoint.url, body, {
         "content-type": "application/json",
         "user-agent": "Tollbooth/1.0",
         "tollbooth-signature": header,
@@ -150,26 +157,20 @@ export async function deliver(deliveryId: string) {
         "tollbooth-event-type": row.eventType,
         "tollbooth-delivery-id": row.id,
         "tollbooth-attempt": String(attempt),
-      },
-      body,
-      signal: controller.signal,
-      redirect: "manual",
-    })
+      }, REQUEST_TIMEOUT_MS)
     status = res.status
-    responseBody = (await res.text().catch(() => "")).slice(0, 2_000)
-    if (res.ok) error = null
+    responseBody = res.body
+    if (res.status >= 200 && res.status < 300) error = null
     else error = `Endpoint responded ${res.status}`
   } catch (err) {
     error = err instanceof Error && err.name === "AbortError" ? "Request timed out" : `Could not reach endpoint: ${(err as Error).message}`
-  } finally {
-    clearTimeout(timer)
   }
 
   const ok = error === null
   const exhausted = attempt >= MAX_ATTEMPTS
   const nextDelay = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)] ?? 0
 
-  await db
+  const [settled] = await db
     .update(schema.tollboothWebhookDeliveries)
     .set({
       status: ok ? "delivered" : exhausted ? "failed" : "pending",
@@ -180,7 +181,9 @@ export async function deliver(deliveryId: string) {
       deliveredAt: ok ? new Date() : null,
       nextAttemptAt: ok ? null : new Date(Date.now() + nextDelay),
     })
-    .where(eq(schema.tollboothWebhookDeliveries.id, row.id))
+    .where(and(eq(schema.tollboothWebhookDeliveries.id, row.id), eq(schema.tollboothWebhookDeliveries.status, "processing"), eq(schema.tollboothWebhookDeliveries.nextAttemptAt, lease)))
+    .returning()
+  if (!settled) return null
 
   await db
     .update(schema.tollboothWebhookEndpoints)
@@ -201,36 +204,59 @@ export async function deliver(deliveryId: string) {
 }
 
 /** Drains due deliveries. Called by the Stripe webhook, the dashboard and a cron. */
-export async function deliverPending(limit = 25) {
+function deliveryDue() {
+  const d = schema.tollboothWebhookDeliveries
+  return and(or(eq(d.status, "pending"), eq(d.status, "processing")), or(isNull(d.nextAttemptAt), lte(d.nextAttemptAt, sql`now()`)))
+}
+
+export async function deliverPending(limit = 25, budgetMs = 20_000) {
+  const deadline = Date.now() + budgetMs
   const due = await db
     .select({ id: schema.tollboothWebhookDeliveries.id })
     .from(schema.tollboothWebhookDeliveries)
     .where(
-      and(
-        eq(schema.tollboothWebhookDeliveries.status, "pending"),
-        or(isNull(schema.tollboothWebhookDeliveries.nextAttemptAt), lte(schema.tollboothWebhookDeliveries.nextAttemptAt, new Date()))
-      )
+      deliveryDue()
     )
     .orderBy(asc(schema.tollboothWebhookDeliveries.createdAt))
     .limit(limit)
 
   const results = []
-  for (const row of due) results.push(await deliver(row.id))
+  for (const row of due) {
+    if (Date.now() + REQUEST_TIMEOUT_MS + 3000 >= deadline) break
+    try { results.push(await deliver(row.id)) }
+    catch (err) { console.error("[tollbooth] delivery attempt failed", err); results.push(null) }
+  }
   return results
 }
 
 /** Re-sends a delivery by hand from the dashboard. */
-export async function replayDelivery(deliveryId: string, tenantId: string) {
+export async function replayDelivery(deliveryId: string, tenantId: string, endpointId?: string) {
   const [row] = await db
     .select()
     .from(schema.tollboothWebhookDeliveries)
-    .where(and(eq(schema.tollboothWebhookDeliveries.id, deliveryId), eq(schema.tollboothWebhookDeliveries.tenantId, tenantId)))
+    .where(and(eq(schema.tollboothWebhookDeliveries.id, deliveryId), eq(schema.tollboothWebhookDeliveries.tenantId, tenantId), endpointId ? eq(schema.tollboothWebhookDeliveries.endpointId, endpointId) : undefined))
   if (!row) return null
-  await db
+  const [queued] = await db
     .update(schema.tollboothWebhookDeliveries)
     .set({ status: "pending", attempts: 0, error: null, nextAttemptAt: new Date() })
-    .where(eq(schema.tollboothWebhookDeliveries.id, deliveryId))
+    .where(and(eq(schema.tollboothWebhookDeliveries.id, deliveryId), or(sql`${schema.tollboothWebhookDeliveries.status} <> 'processing'`, lte(schema.tollboothWebhookDeliveries.nextAttemptAt, new Date()))))
+    .returning()
+  if (!queued) return null
   return deliver(deliveryId)
+}
+
+/** Queues a visibly synthetic event for exactly one owned endpoint. */
+export async function sendEndpointTest(endpointId: string, tenantId: string) {
+  const [endpoint] = await db.select().from(schema.tollboothWebhookEndpoints)
+    .where(and(eq(schema.tollboothWebhookEndpoints.id, endpointId), eq(schema.tollboothWebhookEndpoints.tenantId, tenantId), eq(schema.tollboothWebhookEndpoints.enabled, 1)))
+  if (!endpoint) return null
+  const event: WebhookEvent = {
+    id: `evt_${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+    type: "payment.succeeded", created: Math.floor(Date.now() / 1000), mode: endpoint.mode as TbMode, test: true,
+    data: { object: { object: "payment", id: "test_payment_id", status: "succeeded", amount: 2500, currency: "usd", description: "Tollbooth test event", test: true } },
+  }
+  const [delivery] = await db.insert(schema.tollboothWebhookDeliveries).values({ endpointId, tenantId, eventId: event.id, eventType: event.type, payload: event as unknown as Record<string, unknown>, status: "pending", nextAttemptAt: new Date() }).returning()
+  return deliver(delivery.id)
 }
 
 export { MAX_ATTEMPTS }

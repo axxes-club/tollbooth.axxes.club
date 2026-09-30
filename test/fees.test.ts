@@ -1,8 +1,20 @@
 import { test, describe } from "node:test"
 import assert from "node:assert/strict"
+import * as fees from "@/lib/fees"
 import { applicationFee, netPayout, feeForRefundedAmount, refundFeeDelta, isUuid, currencyExponent, formatMoney, minimumCharge } from "@/lib/fees"
 
 describe("fees", () => {
+  test("major-unit input preserves currency precision without rounding", () => {
+    const parse = (fees as unknown as { parseMoney: (input: string, currency: string) => number | null }).parseMoney
+    assert.equal(parse("10.25", "usd"), 1025)
+    assert.equal(parse("1000", "jpy"), 1000)
+    assert.equal(parse(" 0.50 ", "USD"), 50)
+    assert.equal(parse("0", "usd"), 0)
+    for (const input of ["", "-1", "NaN", "Infinity", "1e3", "0.001", "9007199254740992", "1,000", "+1"]) {
+      assert.equal(parse(input, "usd"), null, input)
+    }
+    assert.equal(parse("100.1", "jpy"), null)
+  })
   test("charges a percentage of the payment", () => {
     assert.equal(applicationFee(2500), 25) // 1% of $25.00
     assert.equal(applicationFee(10_000), 100)

@@ -33,6 +33,39 @@ describe("checkout", { skip }, () => {
       cancelUrl: "https://yoursite.test/cart",
     })
 
+  test("blank return URLs use the hosted outcome pages", async () => {
+    const payment = await createCheckout({ tenantId: TENANT, mode: "test", amount: 1000, currency: "usd", description: "Ticket", successUrl: "", cancelUrl: "" })
+    const params = __stripe.calls("checkout.sessions.create")[0].args[0] as any
+    assert.equal(new URL(params.success_url).pathname, `/pay/complete/${payment.id}`)
+    assert.equal(new URL(params.cancel_url).pathname, `/pay/cancelled/${payment.id}`)
+  })
+
+  test("whitespace return URLs also use hosted outcomes", async () => {
+    const payment = await createCheckout({ tenantId: TENANT, mode: "test", amount: 1000, currency: "usd", description: "Ticket", successUrl: "  ", cancelUrl: "  " })
+    const params = __stripe.calls("checkout.sessions.create")[0].args[0] as any
+    assert.equal(new URL(params.success_url).pathname, `/pay/complete/${payment.id}`)
+  })
+
+  test("a late success event cannot undo a refund or dispute", async () => {
+    for (const status of ["partially_refunded", "refunded", "disputed"]) {
+      const payment = await ready()
+      await sql().query("update tollbooth_payments set status = $2 where id = $1", [payment.id, status])
+      await markSucceeded(payment.id, {})
+      const [row] = await sql().query("select status from tollbooth_payments where id = $1", [payment.id])
+      assert.equal(row.status, status)
+    }
+  })
+
+  test("concurrent success events roll up customer totals once", async () => {
+    const [customer] = await sql().query("insert into tollbooth_customers (tenant_id, email) values ($1, 'race@example.com') returning id", [TENANT])
+    const payment = await ready()
+    await sql().query("update tollbooth_payments set customer_id = $2 where id = $1", [payment.id, customer.id])
+    await Promise.all([markSucceeded(payment.id, {}), markSucceeded(payment.id, {}), markSucceeded(payment.id, {})])
+    const [row] = await sql().query("select total_spent, payment_count from tollbooth_customers where id = $1", [customer.id])
+    assert.equal(row.total_spent, 2500)
+    assert.equal(row.payment_count, 1)
+  })
+
   test("creates a payment and a Stripe checkout session", async () => {
     const payment = await ready()
 

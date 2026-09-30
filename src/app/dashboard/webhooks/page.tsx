@@ -17,13 +17,22 @@ export default async function WebhooksPage() {
   const canManage = ["owner", "admin"].includes(ctx.role)
   const endpoints = await getEndpoints(ctx.tenant.id)
 
-  const sample = `// Verify the signature, then read the event
-const event = JSON.parse(await request.text())
-const signature = request.headers.get("tollbooth-signature") // t=…,v1=…
+  const sample = `import { verifySignature } from "@tollbooth/sdk"
 
-if (event.type === "payment.succeeded") {
-  await fulfillOrder(event.data.object.metadata.order_id)
-}`
+const payload = await request.text()
+const verified = await verifySignature({
+  payload,
+  header: request.headers.get("tollbooth-signature") ?? "",
+  secret: process.env.TOLLBOOTH_WEBHOOK_SECRET ?? "",
+})
+if (!verified) return new Response("Invalid signature", { status: 401 })
+
+const event = JSON.parse(payload)
+if (!event.test && event.mode === "live" && event.type === "payment.succeeded") {
+  // Your fulfillment function must persist event.id to ignore repeat deliveries.
+  await fulfillOrder(event.data.object.reference, event.id)
+}
+return new Response(null, { status: 204 })`
 
   return (
     <>

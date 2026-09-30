@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react"
 import { useRouter } from "next/navigation"
 import { createPrice, createProduct, togglePrice, updateProduct } from "../actions"
+import { currencyExponent, minimumCharge, moneyInputValue, formatMoney } from "@/lib/fees"
 
 export function ProductForm() {
   const router = useRouter()
@@ -23,11 +24,13 @@ export function ProductForm() {
       className="card space-y-4 p-5"
       onSubmit={(e) => {
         e.preventDefault()
+        const form = e.currentTarget
+        const data = new FormData(form)
         setError(null)
         start(async () => {
-          const result = await createProduct(new FormData(e.currentTarget))
+          const result = await createProduct(data)
           if (result.ok) {
-            ;(e.currentTarget as HTMLFormElement).reset()
+            form.reset()
             setOpen(false)
             router.refresh()
           } else setError(result.error)
@@ -61,6 +64,7 @@ export function PriceForm({ products, currencies }: { products: { id: string; na
   const [open, setOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pending, start] = useTransition()
+  const [currency, setCurrency] = useState("usd")
 
   if (!open) {
     return (
@@ -75,11 +79,13 @@ export function PriceForm({ products, currencies }: { products: { id: string; na
       className="card space-y-4 p-5"
       onSubmit={(e) => {
         e.preventDefault()
+        const form = e.currentTarget
+        const data = new FormData(form)
         setError(null)
         start(async () => {
-          const result = await createPrice(new FormData(e.currentTarget))
+          const result = await createPrice(data)
           if (result.ok) {
-            ;(e.currentTarget as HTMLFormElement).reset()
+            form.reset()
             setOpen(false)
             router.refresh()
           } else setError(result.error)
@@ -99,11 +105,11 @@ export function PriceForm({ products, currencies }: { products: { id: string; na
       <div className="grid grid-cols-[1fr_88px] gap-2">
         <label className="block">
           <span className="mb-1.5 block text-xs font-medium text-muted">Amount</span>
-          <input className="input" name="amount" type="number" step="0.01" min="0.5" required placeholder="25.00" />
+          <input className="input" name="amount" type="number" step={currencyExponent(currency) === 0 ? "1" : "0.01"} min={moneyInputValue(minimumCharge(currency), currency)} required placeholder={currencyExponent(currency) === 0 ? "1000" : "25.00"} />
         </label>
         <label className="block">
           <span className="mb-1.5 block text-xs font-medium text-muted">Currency</span>
-          <select className="input" name="currency" defaultValue="usd">
+          <select className="input" name="currency" value={currency} onChange={(e) => setCurrency(e.target.value)}>
             {currencies.map((c) => (
               <option key={c} value={c}>{c.toUpperCase()}</option>
             ))}
@@ -137,7 +143,7 @@ export function PriceRow({
     <li className="flex flex-wrap items-center justify-between gap-3 py-3">
       <div className="min-w-0">
         <p className="font-medium tabular-nums">
-          {(price.amount / 100).toFixed(2)} <span className="text-xs uppercase text-muted">{price.currency}</span>
+          {formatMoney(price.amount, price.currency)}
           {price.nickname && <span className="ml-2 text-sm font-normal text-muted">{price.nickname}</span>}
         </p>
         {price.lookupKey && <p className="font-mono text-[11px] text-muted">{price.lookupKey}</p>}

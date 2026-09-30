@@ -34,7 +34,7 @@ npm run dev
 ## Tests
 
 ```bash
-npm test                    # 153 tests: build, then run
+npm test                    # compile and run unit and database-backed suites
 npm run test:watch          # same, in watch mode
 npm run verify              # typecheck + tests + the checks below + a build
 ```
@@ -63,6 +63,16 @@ conditional updates, unique constraints, races — only exists in Postgres. Each
 gets its own synthetic workspace, and cleans up after itself; `DATABASE_URL` must be
 set, and without it the database-backed suites are skipped rather than silently
 passing.
+
+`npm test` reads the command environment. To use the connection in `.env.local`
+without printing or copying credentials into a shell command:
+
+```bash
+node --env-file=.env.local -e 'const {spawnSync}=require("node:child_process"); process.exit(spawnSync("npm",["run","verify"],{stdio:"inherit",env:process.env}).status ?? 1)'
+```
+
+Use a dedicated test database when available. Stripe calls in the test suite use
+the recording fake, so payment tests do not charge cards.
 
 ## Checks
 
@@ -136,9 +146,18 @@ curl https://tollbooth.axxes.club/api/v1/checkout-sessions \
   rather than charging twice. Reusing a key with a different body is a `400`, and a
   failed request releases the key so a retry can succeed.
 - **Webhooks** — signed with HMAC-SHA256 over `timestamp.body`, so a captured
-  delivery can't be replayed. Retried with backoff (6 attempts over ~24h), and an
+  delivery can't be replayed. Retried with backoff (up to 6 attempts), and an
   endpoint that runs out of attempts is disabled rather than left failing. Every
   attempt is logged and replayable.
+- **Delivery workers** — atomically lease each attempt, recover abandoned leases,
+  and stop starting work before the function deadline. Outbound connections use
+  pinned DNS and reject private network destinations in production. Response
+  bodies are capped at 2 KB. Manual replay and test buttons target the selected
+  delivery or endpoint; test events contain an explicit `test: true` marker.
+- **Retry scheduling** — the checked-in daily cron is a recovery sweep, not a
+  promise of prompt retries. Configure an authenticated minute-level scheduler
+  before launch if merchants depend on timely retry delivery. The cron returns
+  503 when `CRON_SECRET` is absent and 401 for an incorrect bearer secret.
 - **Rate limits** — 300 reads / 120 writes per minute per key. `x-ratelimit-*` is on
   every response, including errors and idempotent replays; a `429` carries `retry-after`.
 - **Refunds are cumulative** — fee returned is computed from the *total* refunded

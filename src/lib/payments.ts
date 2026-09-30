@@ -1,5 +1,5 @@
 import "server-only"
-import { and, eq, sql } from "drizzle-orm"
+import { and, eq, inArray, sql } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { applicationFee } from "@/lib/fees"
 import { stripe } from "@/lib/stripe"
@@ -90,7 +90,13 @@ type CreateCheckout = {
  * merchant's view honest about attempts that were made.
  */
 export async function createCheckout(input: CreateCheckout): Promise<TbPayment> {
+  const successUrl = input.successUrl.trim()
+  const cancelUrl = input.cancelUrl.trim()
+  if ((successUrl && !safeUrl(successUrl)) || (cancelUrl && !safeUrl(cancelUrl))) throw new Error("Checkout return URLs must use HTTPS")
   const account = await requireReadyAccount(input.tenantId)
+  // Fail configuration checks before persisting a checkout that cannot start.
+  const client = stripe(input.mode)
+  const site = new URL(process.env.TOLLBOOTH_SITE_URL || "https://tollbooth.axxes.club")
   const amount = input.amount * (input.quantity ?? 1)
   const fee = applicationFee(amount)
   const now = new Date()
@@ -114,20 +120,18 @@ export async function createCheckout(input: CreateCheckout): Promise<TbPayment> 
       metadata: input.metadata ?? {},
       source: input.source ?? "api",
       mode: input.mode,
-      successUrl: input.successUrl,
+      successUrl,
       expiresAt,
       status: "pending",
     })
     .returning()
 
-  const client = stripe(input.mode)
   // Tollbooth's own return page is the safe default: it can show the outcome even if
   // the merchant forgets to build a thank-you screen.
-  const site = new URL(process.env.TOLLBOOTH_SITE_URL ?? "https://tollbooth.axxes.club")
-  const success = input.successUrl
-    ? appendQuery(input.successUrl, { tollbooth_payment_id: payment.id })
+  const success = successUrl
+    ? appendQuery(successUrl, { tollbooth_payment_id: payment.id })
     : new URL(`/pay/complete/${payment.id}`, site).toString()
-  const cancel = input.cancelUrl ?? new URL(`/pay/cancelled/${payment.id}`, site).toString()
+  const cancel = cancelUrl || new URL(`/pay/cancelled/${payment.id}`, site).toString()
 
   try {
     const session = await client.checkout.sessions.create(
@@ -222,7 +226,7 @@ export async function fetchBalance(stripeAccountId: string, mode: TbMode) {
  */
 export async function markSucceeded(paymentId: string, patch: { paymentIntentId?: string; customerEmail?: string | null }) {
   const [payment] = await db.select().from(schema.tollboothPayments).where(eq(schema.tollboothPayments.id, paymentId))
-  if (!payment || payment.status === "succeeded") return payment ?? null
+  if (!payment || !["pending", "failed", "expired"].includes(payment.status)) return payment ?? null
 
   const now = new Date()
   const [updated] = await db
@@ -234,10 +238,14 @@ export async function markSucceeded(paymentId: string, patch: { paymentIntentId?
       lastError: null,
       updatedAt: now,
     })
-    .where(and(eq(schema.tollboothPayments.id, paymentId), sql`${schema.tollboothPayments.status} <> 'succeeded'`))
+    .where(and(eq(schema.tollboothPayments.id, paymentId), inArray(schema.tollboothPayments.status, ["pending", "failed", "expired"])))
     .returning()
 
-  const settled = updated ?? payment
+  if (!updated) {
+    const [current] = await db.select().from(schema.tollboothPayments).where(eq(schema.tollboothPayments.id, paymentId))
+    return current ?? payment
+  }
+  const settled = updated
 
   // Roll up to the customer. The WHERE guard keeps concurrent webhooks from
   // double-counting the same payment into total_spent.
@@ -282,4 +290,3 @@ export async function markTerminal(paymentId: string, status: "failed" | "expire
   await emitPayment(updated, type, { status: payment.status }).catch((e) => console.error(`[tollbooth] ${type} emit failed`, e))
   return updated
 }
-

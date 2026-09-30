@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react"
 import { useRouter } from "next/navigation"
 import { refundPayment } from "../../actions"
-import { formatMoney } from "@/lib/fees"
+import { formatMoney, parseMoney, moneyInputValue, currencyExponent } from "@/lib/fees"
 
 const REASONS = [
   { value: "", label: "No reason" },
@@ -25,8 +25,8 @@ export function RefundForm({ paymentId, currency, remaining }: { paymentId: stri
   const [done, setDone] = useState(false)
   const [pending, start] = useTransition()
 
-  const parsed = amount.trim() === "" ? remaining : Math.round(Number(amount) * 100)
-  const invalid = !Number.isFinite(parsed) || parsed < 1 || parsed > remaining
+  const parsed = amount.trim() === "" ? remaining : parseMoney(amount, currency)
+  const invalid = parsed === null || parsed < 1 || parsed > remaining
 
   async function submit() {
     setError(null)
@@ -56,8 +56,8 @@ export function RefundForm({ paymentId, currency, remaining }: { paymentId: stri
         </span>
         <input
           className="input"
-          inputMode="decimal"
-          placeholder={(remaining / 100).toFixed(2)}
+          inputMode={currencyExponent(currency) === 0 ? "numeric" : "decimal"}
+          placeholder={moneyInputValue(remaining, currency)}
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
         />
@@ -76,7 +76,7 @@ export function RefundForm({ paymentId, currency, remaining }: { paymentId: stri
 
       {error && <p className="rounded-lg bg-danger/10 px-3 py-2 text-sm text-danger" role="alert">{error}</p>}
 
-      {confirming ? (
+      {confirming && !invalid && parsed !== null ? (
         <div className="rounded-xl border border-amber-400/30 bg-amber-400/5 p-3">
           <p className="text-sm">
             Refund <strong className="tabular-nums">{formatMoney(parsed, currency)}</strong> to {paymentId.slice(0, 8)}? This can't be undone.
@@ -95,7 +95,7 @@ export function RefundForm({ paymentId, currency, remaining }: { paymentId: stri
           Refund
         </button>
       )}
-      {invalid && amount.trim() !== "" && <p className="text-xs text-danger">Enter an amount between 0 and {(remaining / 100).toFixed(2)}</p>}
+      {invalid && amount.trim() !== "" && <p className="text-xs text-danger" role="alert">Enter an amount from {formatMoney(1, currency)} to {formatMoney(remaining, currency)} with valid currency precision.</p>}
     </div>
   )
 }

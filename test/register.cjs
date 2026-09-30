@@ -21,6 +21,7 @@ process.env.STRIPE_SECRET_KEY ??= "sk_test_testonly"
 process.env.STRIPE_SECRET_KEY_TEST ??= "sk_test_testonly"
 process.env.TOLLBOOTH_FEE_BPS ??= "100"
 process.env.TOLLBOOTH_FEE_FIXED ??= "0"
+process.env.NODE_ENV = "test"
 
 const ROOT = path.resolve(__dirname, "..")
 const BUILD = path.join(ROOT, ".test-build")

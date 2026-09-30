@@ -249,7 +249,7 @@ export const tollboothWebhookDeliveries = pgTable(
     eventId: text("event_id").notNull(),
     eventType: text("event_type").notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>(),
-    status: text("status").notNull().default("pending"), // pending | delivered | failed
+    status: text("status").notNull().default("pending"), // pending | processing (leased) | delivered | failed
     attempts: integer("attempts").notNull().default(0),
     responseStatus: integer("response_status"),
     responseBody: text("response_body"),

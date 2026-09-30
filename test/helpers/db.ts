@@ -54,11 +54,13 @@ export function sql() {
 export async function resetTestData(suite: Suite) {
   if (!hasDatabase()) return
   const db = sql()
-  for (const table of TENANT_TABLES) {
-    await db.query(`delete from ${table} where tenant_id = $1`, [suite.tenant])
-  }
-  await db.query(`delete from tollbooth_idempotency_keys where tenant_id = $1`, [suite.tenant])
-  await db.query(`delete from tollbooth_events where id like $1`, [`${suite.eventPrefix}%`])
+  // One atomic HTTP transaction retains the deletion order and suite scoping,
+  // without twelve network round trips before every test.
+  await db.transaction([
+    ...TENANT_TABLES.map((table) => db.query(`delete from ${table} where tenant_id = $1`, [suite.tenant])),
+    db.query(`delete from tollbooth_idempotency_keys where tenant_id = $1`, [suite.tenant]),
+    db.query(`delete from tollbooth_events where id like $1`, [`${suite.eventPrefix}%`]),
+  ])
 }
 
 /** A connected account that reports itself ready to take charges. */

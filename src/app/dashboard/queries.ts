@@ -9,12 +9,12 @@ export async function getAccount(tenantId: string) {
   return account ?? null
 }
 
-export async function getPayments(tenantId: string, limit = 50, status?: string) {
+export async function getPayments(tenantId: string, limit = 50, status?: string, mode?: TbMode) {
   const p = schema.tollboothPayments
   return db
     .select()
     .from(p)
-    .where(status ? and(eq(p.tenantId, tenantId), eq(p.status, status)) : eq(p.tenantId, tenantId))
+    .where(and(eq(p.tenantId, tenantId), status ? eq(p.status, status) : undefined, mode ? eq(p.mode, mode) : undefined))
     .orderBy(desc(p.createdAt))
     .limit(limit)
 }
@@ -48,7 +48,7 @@ export async function getVolume(tenantId: string, days = 30, mode?: TbMode): Pro
       currency: p.currency,
       gross: sql<number>`coalesce(sum(${p.amount}) filter (where ${paid}), 0)`.mapWith(Number),
       refunded: sql<number>`coalesce(sum(${p.amountRefunded}), 0)`.mapWith(Number),
-      fees: sql<number>`coalesce(sum(${p.netFee}), 0)`.mapWith(Number),
+      fees: sql<number>`coalesce(sum(${p.netFee}) filter (where ${paid}), 0)`.mapWith(Number),
       succeeded: sql<number>`count(*) filter (where ${paid})`.mapWith(Number),
       total: sql<number>`count(*)`.mapWith(Number),
       expired: sql<number>`count(*) filter (where ${p.status} in ('expired','failed'))`.mapWith(Number),
@@ -59,12 +59,13 @@ export async function getVolume(tenantId: string, days = 30, mode?: TbMode): Pro
 }
 
 /** Gross volume per day, for the dashboard sparkline. */
-export async function getDailyVolume(tenantId: string, days = 30, mode?: TbMode) {
+export async function getDailyVolume(tenantId: string, days = 30, mode?: TbMode, currency?: string) {
   const p = schema.tollboothPayments
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
   const paid = sql`${p.status} in ('succeeded','partially_refunded','refunded')`
   const conditions: (SQL | undefined)[] = [eq(p.tenantId, tenantId), gte(p.createdAt, since)]
   if (mode) conditions.push(eq(p.mode, mode))
+  if (currency) conditions.push(eq(p.currency, currency))
 
   return db
     .select({
@@ -148,7 +149,7 @@ export async function getEndpoints(tenantId: string) {
     .orderBy(desc(schema.tollboothWebhookDeliveries.createdAt))
     .limit(100)
 
-  return endpoints.map((endpoint) => ({ ...endpoint, deliveries: deliveries.filter((d) => d.endpointId === endpoint.id).slice(0, 8) }))
+  return endpoints.map(({ secret: _secret, ...endpoint }) => ({ ...endpoint, deliveries: deliveries.filter((d) => d.endpointId === endpoint.id).slice(0, 8) }))
 }
 
 export async function getApiKeys(tenantId: string) {
@@ -183,7 +184,7 @@ export async function getOnboarding(tenantId: string) {
   const [account, keyCount, productCount, linkCount, endpointCount, paidCount] = await Promise.all([
     getAccount(tenantId),
     db.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(schema.tollboothApiKeys).where(and(eq(schema.tollboothApiKeys.tenantId, tenantId), sql`${schema.tollboothApiKeys.revokedAt} is null`)),
-    db.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(schema.tollboothProducts).where(eq(schema.tollboothProducts.tenantId, tenantId)),
+    db.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(schema.tollboothPrices).where(and(eq(schema.tollboothPrices.tenantId, tenantId), eq(schema.tollboothPrices.active, 1))),
     db.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(schema.tollboothLinks).where(eq(schema.tollboothLinks.tenantId, tenantId)),
     db.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(schema.tollboothWebhookEndpoints).where(eq(schema.tollboothWebhookEndpoints.tenantId, tenantId)),
     db.select({ n: sql<number>`count(*)`.mapWith(Number) }).from(schema.tollboothPayments).where(and(eq(schema.tollboothPayments.tenantId, tenantId), eq(schema.tollboothPayments.mode, "test"), sql`${schema.tollboothPayments.status} = 'succeeded'`)),
@@ -191,13 +192,14 @@ export async function getOnboarding(tenantId: string) {
 
   const steps = [
     { id: "payouts", label: "Connect a payout account", done: !!account?.chargesEnabled, href: "/dashboard/settings", detail: "Tells us where to send your money. Takes a few minutes." },
-    { id: "catalog", label: "Add something to sell", done: productCount[0]!.n > 0 || linkCount[0]!.n > 0, href: "/dashboard/products", detail: "A product with a price, or a payment link — either works." },
+    { id: "catalog", label: "Add a price or payment link", done: productCount[0]!.n > 0 || linkCount[0]!.n > 0, href: "/dashboard/products", detail: "Set a price, then share a payment link. No code needed." },
     { id: "key", label: "Create an API key", done: keyCount[0]!.n > 0, href: "/dashboard/developers", detail: "Only needed if you charge from your own app." },
     { id: "webhook", label: "Point a webhook at your app", done: endpointCount[0]!.n > 0, href: "/dashboard/webhooks", detail: "How your app finds out a payment succeeded." },
     { id: "test", label: "Take a test payment", done: paidCount[0]!.n > 0, href: "/dashboard/developers", detail: "Uses fake money. Nothing is charged." },
   ]
 
-  return { steps, done: steps.filter((s) => s.done).length, total: steps.length, account }
+  const required = steps.slice(0, 2)
+  return { steps: required, optionalSteps: steps.slice(2), done: required.filter((s) => s.done).length, total: required.length, account }
 }
 
 export { isLiveMode }

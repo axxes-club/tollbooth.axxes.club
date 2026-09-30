@@ -3,6 +3,7 @@ import { requireContext } from "@/lib/context"
 import { PageHeader, Empty, Stat, Notice } from "@/components/ui"
 import { PaymentsTable } from "@/components/payments-table"
 import { formatMoney } from "@/lib/fees"
+import { stripeMode } from "@/lib/stripe"
 import { getPayments, getVolume } from "../queries"
 
 const FILTERS = [
@@ -24,11 +25,11 @@ export default async function PaymentsPage({
   const ctx = await requireContext()
   const params = await searchParams
   const active = FILTERS.find((f) => f.value === params.status)?.value ?? "all"
-  const mode = params.mode === "test" || params.mode === "live" ? params.mode : undefined
+  const mode = params.mode === "test" || params.mode === "live" ? params.mode : stripeMode()
   const q = params.q?.trim() ?? ""
 
   const [payments, volume] = await Promise.all([
-    getPayments(ctx.tenant.id, 200, active === "all" ? undefined : active),
+    getPayments(ctx.tenant.id, 200, active === "all" ? undefined : active, mode),
     getVolume(ctx.tenant.id, 30, mode),
   ])
 
@@ -49,7 +50,7 @@ export default async function PaymentsPage({
     <>
       <PageHeader
         title="Payments"
-        description="Every charge started through Tollbooth, newest first."
+        description={`${mode === "test" ? "Test" : "Live"} payments, newest first.`}
         action={
           <Link href="/api/dashboard/payments.csv" className="btn-ghost">
             Export CSV
