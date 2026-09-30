@@ -1,3 +1,6 @@
+"use client"
+
+import { useBrand, CustomerLogo, CustomerMark } from "@/components/brand"
 import { product } from "@/product.config"
 
 /**
@@ -14,7 +17,7 @@ function Mark({ size = 28 }: { size?: number }) {
   )
 }
 
-export function Logo({ size = "md" }: { size?: "md" | "lg" }) {
+function AxxesLogo({ size = "md" }: { size?: "md" | "lg" }) {
   const large = size === "lg"
   return (
     <span className="flex items-center gap-2.5">
@@ -28,10 +31,22 @@ export function Logo({ size = "md" }: { size?: "md" | "lg" }) {
 }
 
 /** Just the badge, for the collapsed rail where the wordmark has no room. */
-export function LogoMark() {
+function AxxesLogoMark() {
   return (
     <span className="mx-auto grid size-7 place-items-center rounded-lg bg-accent font-mono text-sm font-bold text-accent-ink">
       {product.name[0]}
     </span>
   )
+}
+
+/** The product logo: a white-label customer's own brand when they have one. */
+export function Logo(props: React.ComponentProps<typeof AxxesLogo>) {
+  const brand = useBrand()
+  const large = (props as { size?: string }).size === "lg"
+  return brand ? <CustomerLogo brand={brand} productName={product.name} large={large} /> : <AxxesLogo {...props} />
+}
+
+export function LogoMark() {
+  const brand = useBrand()
+  return brand ? <CustomerMark brand={brand} /> : <AxxesLogoMark />
 }
