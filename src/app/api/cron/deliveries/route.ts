@@ -11,8 +11,9 @@ export const maxDuration = 60
  * after each event, so this exists for the case where the app was asleep when an
  * event landed: a customer turns their app on and the backlog clears within a minute.
  *
- * Vercel cron calls this every minute (see vercel.json). It is also safe to POST to
- * by hand. Requires `Authorization: Bearer $CRON_SECRET` when that is set.
+ * Vercel cron calls this once a day (see vercel.json; the Hobby plan allows no
+ * more), with GET. It is also safe to POST to by hand, for a faster drain.
+ * Requires `Authorization: Bearer $CRON_SECRET` when that is set.
  */
 export async function POST(req: Request) {
   const secret = process.env.CRON_SECRET
@@ -29,3 +30,6 @@ export async function POST(req: Request) {
   const delivered = results.filter((r) => r?.ok).length
   return NextResponse.json({ attempted: results.length, delivered, failed: results.length - delivered })
 }
+
+// Vercel cron jobs send GET.
+export const GET = POST
