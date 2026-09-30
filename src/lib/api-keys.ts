@@ -51,7 +51,9 @@ export type ApiCaller = { tenantId: string; apiKeyId: string; mode: TbMode; scop
 /** Reads `tb_live_…` or `tb_test_…` out of the Authorization header. */
 export function bearerToken(req: Request): { key: string; mode: TbMode } | null {
   const header = req.headers.get("authorization") ?? ""
-  const key = header.startsWith("Bearer ") ? header.slice(7).trim() : ""
+  // RFC 7235 makes the auth scheme case-insensitive, and some clients and proxies
+  // lower-case it. Rejecting `bearer …` would be a confusing 401.
+  const key = /^bearer\s+(.+)$/i.exec(header.trim())?.[1]?.trim() ?? ""
   const match = /^tb_(live|test)_/.exec(key)
   return match ? { key, mode: match[1] as TbMode } : null
 }

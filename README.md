@@ -27,9 +27,62 @@ are ours.
 
 ```bash
 cp .env.example .env.local     # then fill it in
-psql "$DATABASE_URL" -f scripts/create-tables.sql
+npm run db:migrate             # or: psql "$DATABASE_URL" -f scripts/create-tables.sql
 npm run dev
 ```
+
+## Tests
+
+```bash
+npm test                    # 153 tests: build, then run
+npm run test:watch          # same, in watch mode
+npm run verify              # typecheck + tests + the checks below + a build
+```
+
+No test framework was added: the suite runs on Node's built-in `node:test`, so it
+costs nothing to run. `tsc` compiles the app and the tests to `.test-build/`, and
+`test/register.cjs` supplies the three things Next normally provides — the `@/`
+alias, the `server-only` marker, and a recording stand-in for the Stripe SDK. That
+means the money logic is exercised without network access and without real money.
+
+| Suite | Covers |
+| --- | --- |
+| `fees` | Fee arithmetic, refunds, zero-decimal currencies, UUID guards |
+| `api-keys` | Key minting, mode prefixes, scope enforcement, constant-time compare |
+| `signing` | Webhook signature verification, tampering, replay windows |
+| `checkout` | Creating a checkout, payment lifecycle, URL validation |
+| `refunds` | Full and partial refunds, fee returned, reservation races |
+| `webhook-delivery` | Real HTTP delivery: headers, signature, retries, auto-disable |
+| `stripe-webhook` | Inbound Stripe events, signature rejection, idempotency |
+| `api` | Every wrapper an endpoint inherits, plus per-endpoint validation |
+| `sdk` | The published client: idempotency keys, retries, verification |
+| `slugs` | Link slug generation and collision handling |
+
+Tests run against the real database, because the behaviour worth covering —
+conditional updates, unique constraints, races — only exists in Postgres. Each suite
+gets its own synthetic workspace, and cleans up after itself; `DATABASE_URL` must be
+set, and without it the database-backed suites are skipped rather than silently
+passing.
+
+## Checks
+
+```bash
+npm run check:fees          # property tests on the fee and refund arithmetic
+npm run check:schema        # drizzle schema vs the migration vs the live database
+npm run check:concurrency   # races that a functional test cannot see (needs DATABASE_URL)
+```
+
+Each of these exists because of a specific bug, not because it seemed like a good idea:
+
+- **`check:schema`** — a mistyped column name is invisible to TypeScript and fatal at
+  runtime. (`payout_enabled` vs `payouts_enabled` took down every account query.)
+- **`check:fees`** — a rounding slip in partial refunds returns more fee than was
+  charged, and nothing notices until the books don't balance. A $25 payment with a 25¢
+  fee refunded in halves used to return 26¢.
+- **`check:concurrency`** — the most expensive bugs in a payments codebase are races,
+  and neither shows up functionally: a duplicate charge when two identical requests
+  arrive together, and an over-refund when two refunds hit the same payment. Both
+  return 200/201 every time regardless.
 
 The SQL is additive: it only creates `tollbooth_*` tables and never alters the
 tables shared with members.axxes.club. It's safe to re-run.
@@ -80,13 +133,24 @@ curl https://tollbooth.axxes.club/api/v1/checkout-sessions \
 ### Reliability
 
 - **Idempotency** — `Idempotency-Key` on any write replays the original response
-  rather than charging twice. Reusing a key with a different body is a `400`.
+  rather than charging twice. Reusing a key with a different body is a `400`, and a
+  failed request releases the key so a retry can succeed.
 - **Webhooks** — signed with HMAC-SHA256 over `timestamp.body`, so a captured
   delivery can't be replayed. Retried with backoff (6 attempts over ~24h), and an
   endpoint that runs out of attempts is disabled rather than left failing. Every
   attempt is logged and replayable.
-- **Rate limits** — 300 reads / 120 writes per minute per key, with
-  `x-ratelimit-*` headers and `retry-after` on a `429`.
+- **Rate limits** — 300 reads / 120 writes per minute per key. `x-ratelimit-*` is on
+  every response, including errors and idempotent replays; a `429` carries `retry-after`.
+- **Refunds are cumulative** — fee returned is computed from the *total* refunded
+  amount, so splitting a payment into any number of partial refunds can never return
+  more fee than was charged.
+- **Concurrent duplicates don't double-charge** — a second request with the same
+  `Idempotency-Key` waits for the first to finish and returns its response, which is
+  the case the header exists for. It only returns a `409` if the first is still
+  running after five seconds.
+- **Refunds are serialised** — a refund claims its amount on the payment with a
+  conditional update before calling Stripe, so two refunds racing for the same payment
+  produce one refund and one `409`, never a double refund.
 
 ## SDK
 

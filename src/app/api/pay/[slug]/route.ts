@@ -2,6 +2,7 @@ import { NextResponse } from "next/server"
 import { and, eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { createCheckout, NotReadyError } from "@/lib/payments"
+import { stripeMode } from "@/lib/stripe"
 
 /**
  * POST /api/pay/:slug
@@ -49,7 +50,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
   try {
     const payment = await createCheckout({
       tenantId: link.tenantId,
-      mode: "live",
+      // A link isn't tied to an API key, so it follows the platform's own mode.
+      // Hardcoding "live" would break every link on a test-mode deployment, and
+      // would record test payments as though they were real.
+      mode: stripeMode(),
       amount: price.amount,
       currency: price.currency,
       description: product?.name ?? link.name,

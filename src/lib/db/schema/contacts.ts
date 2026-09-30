@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, integer, jsonb, pgEnum, index } from "drizzle-orm/pg-core"
+import { pgTable, text, timestamp, uuid, integer, jsonb, pgEnum, index, boolean } from "drizzle-orm/pg-core"
 import { relations } from "drizzle-orm"
 import { tenants } from "./tenants"
 import { user } from "./users"
@@ -194,5 +194,3 @@ export type NewCustomerSegment = typeof customerSegments.$inferInsert
 export type ContactInteraction = typeof contactInteractions.$inferSelect
 export type NewContactInteraction = typeof contactInteractions.$inferInsert
 
-// Import boolean for the schema
-import { boolean } from "drizzle-orm/pg-core"

@@ -9,6 +9,7 @@ import { requireContext } from "@/lib/context"
 import { stripe } from "@/lib/stripe"
 import { generateApiKey, generateWebhookSecret, scopesForWrite, type Scope } from "@/lib/api-keys"
 import { createRefund, RefundError } from "@/lib/refunds"
+import { safeUrl } from "@/lib/payments"
 import { uniqueLinkSlug } from "@/lib/slugs"
 import { deliverPending } from "@/lib/webhooks"
 import { CURRENCIES } from "@/lib/fees"
@@ -276,15 +277,7 @@ export async function createLink(formData: FormData): Promise<ActionResult<{ url
   return { ok: true, data: { url: new URL(`/pay/${slug}`, site).toString() } }
 }
 
-function safeHttp(value: string) {
-  if (!value) return null
-  try {
-    const url = new URL(value)
-    return url.protocol === "https:" ? url.toString() : null
-  } catch {
-    return null
-  }
-}
+const safeHttp = (value: string) => safeUrl(value)
 
 export async function toggleLink(id: string, active: boolean): Promise<ActionResult> {
   const ctx = await requireManager()

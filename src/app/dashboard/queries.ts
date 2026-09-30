@@ -1,5 +1,5 @@
 import "server-only"
-import { and, desc, eq, gte, sql, type SQL } from "drizzle-orm"
+import { and, desc, eq, gte, inArray, sql, type SQL } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { isLiveMode } from "@/lib/stripe"
 import type { TbMode } from "@/lib/db/schema/tollbooth"
@@ -137,7 +137,12 @@ export async function getEndpoints(tenantId: string) {
     .where(
       and(
         eq(schema.tollboothWebhookDeliveries.tenantId, tenantId),
-        sql`${schema.tollboothWebhookDeliveries.endpointId} in ${endpoints.map((e) => e.id)}`
+        // `inArray` parameterises the list. Interpolating a JS array into a raw
+        // `sql` fragment produces literal brackets and a syntax error.
+        inArray(
+          schema.tollboothWebhookDeliveries.endpointId,
+          endpoints.map((endpoint) => endpoint.id)
+        )
       )
     )
     .orderBy(desc(schema.tollboothWebhookDeliveries.createdAt))

@@ -1,8 +1,8 @@
 import "server-only"
 import { createHmac, randomUUID, timingSafeEqual } from "crypto"
-import { and, asc, eq, inArray, lte, or, isNull } from "drizzle-orm"
+import { and, asc, eq, isNull, lte, or, sql } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
-import { serializePayment, serializeRefund, serializeCustomer } from "@/lib/api"
+import { serializePayment, serializeRefund } from "@/lib/api"
 import type { TbMode, TbPayment } from "@/lib/db/schema/tollbooth"
 
 /**
@@ -187,8 +187,11 @@ export async function deliver(deliveryId: string) {
     .set({
       lastDeliveryAt: new Date(),
       lastDeliveryStatus: ok ? "delivered" : exhausted ? "failed" : "retrying",
-      // A run of failures disables the endpoint so a dead URL stops costing requests.
-      failureCount: ok ? 0 : exhausted ? 9_999 : undefined,
+      // Count consecutive failures so the dashboard can flag an endpoint that is
+      // struggling while it's still being retried, not only once it gives up.
+      failureCount: ok ? 0 : sql`${schema.tollboothWebhookEndpoints.failureCount} + 1`,
+      // An endpoint that has exhausted its retries is disabled, so a dead URL stops
+      // costing a request on every payment.
       enabled: ok || !exhausted ? undefined : 0,
       updatedAt: new Date(),
     })

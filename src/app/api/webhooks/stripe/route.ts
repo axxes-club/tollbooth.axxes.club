@@ -76,13 +76,22 @@ export async function POST(req: Request) {
   }
 
   // Flush queued outbound events once we're done, off the response path.
-  after(async () => {
-    try {
-      await deliverPending()
-    } catch (err) {
-      console.error("[tollbooth] delivery drain failed", err)
-    }
-  })
+  //
+  // `after` needs a request scope. If it is unavailable, the deliveries still go out
+  // on the next cron tick, so failing the webhook here would be worse than useless:
+  // the event has already been applied and recorded, and a 500 would only make Stripe
+  // retry something that succeeded.
+  try {
+    after(async () => {
+      try {
+        await deliverPending()
+      } catch (err) {
+        console.error("[tollbooth] delivery drain failed", err)
+      }
+    })
+  } catch (err) {
+    console.error("[tollbooth] could not defer webhook delivery", err)
+  }
 
   return NextResponse.json({ received: true, duplicate: !inserted.length })
 }
@@ -139,8 +148,10 @@ async function handle(event: Stripe.Event) {
         .set({
           amountRefunded: charge.amount_refunded,
           status: charge.refunded ? "refunded" : "partially_refunded",
-          // Only keep fees in proportion to the amount that is still with the customer.
-          netFee: sql`greatest(0, ${payments.applicationFee} - round(${payments.applicationFee} * ${charge.amount_refunded} / nullif(${payments.amount}, 0)))`,
+          // Recompute from the total refunded, flooring — the same rule
+          // `refundFeeDelta` uses. Rounding here would hand back more fee than was
+          // charged once a payment is refunded in several parts.
+          netFee: sql`greatest(0, ${payments.applicationFee} - floor(${payments.applicationFee} * ${charge.amount_refunded} / greatest(${payments.amount}, 1)))`,
           updatedAt: now,
         })
         .where(eq(payments.paymentIntentId, paymentIntent))

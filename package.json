@@ -5,7 +5,16 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:build && node --require ./test/register.cjs --test .test-build/test/*.test.js",
+    "test:build": "tsc -p tsconfig.test.json",
+    "test:watch": "npm run test:build && node --require ./test/register.cjs --test --watch .test-build/test/*.test.js",
+    "check:fees": "node scripts/check-fees.mjs",
+    "check:schema": "node scripts/check-schema.mjs",
+    "check:concurrency": "node scripts/check-concurrency.mjs",
+    "db:migrate": "psql \"$DATABASE_URL\" -f scripts/create-tables.sql",
+    "verify": "npm run typecheck && npm run test && npm run check:fees && npm run check:schema && npm run check:concurrency && npm run build"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

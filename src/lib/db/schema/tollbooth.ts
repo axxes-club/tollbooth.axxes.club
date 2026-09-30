@@ -12,7 +12,7 @@ export const tollboothAccounts = pgTable("tollbooth_accounts", {
   tenantId: uuid("tenant_id").primaryKey(),
   stripeAccountId: text("stripe_account_id").notNull().unique(),
   chargesEnabled: integer("charges_enabled").notNull().default(0),
-  payoutsEnabled: integer("payout_enabled").notNull().default(0),
+  payoutsEnabled: integer("payouts_enabled").notNull().default(0),
   detailsSubmitted: integer("details_submitted").notNull().default(0),
   country: text("country"),
   defaultCurrency: text("default_currency"),
@@ -143,7 +143,8 @@ export const tollboothPayments = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     tenantId: uuid("tenant_id").notNull(),
     apiKeyId: uuid("api_key_id"),
-    status: text("status").notNull().default("pending"), // pending | succeeded | failed | expired | refunded | partially_refunded
+    // pending | succeeded | failed | expired | refunded | partially_refunded | disputed
+    status: text("status").notNull().default("pending"),
     amount: integer("amount").notNull(), // minor units
     currency: text("currency").notNull(),
     applicationFee: integer("application_fee").notNull().default(0),

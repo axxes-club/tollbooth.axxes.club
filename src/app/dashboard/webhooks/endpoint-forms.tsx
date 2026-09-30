@@ -26,7 +26,7 @@ type Endpoint = {
   }[]
 }
 
-export function EndpointForm({ events, siteUrl }: { events: string[]; siteUrl: string }) {
+export function EndpointForm({ events }: { events: string[] }) {
   const router = useRouter()
   const [secret, setSecret] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)

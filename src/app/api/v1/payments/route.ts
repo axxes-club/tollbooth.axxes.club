@@ -1,8 +1,20 @@
-import { and, eq, gte, lte, type SQL } from "drizzle-orm"
+import { and, eq, gte, inArray, lte, type SQL } from "drizzle-orm"
 import { schema } from "@/lib/db"
 import { fail, jsonResponse, listBody, paginate, serializePayment, withApi } from "@/lib/api"
 
-const STATUSES = new Set(["pending", "succeeded", "failed", "expired", "refunded", "partially_refunded"])
+// Every status a payment can be in. Must stay in step with the `status` column's
+// comment in the schema and with the webhook handler that writes them — `disputed`
+// in particular is written by the dispute handler, so leaving it out here made the
+// dashboard's "Disputed" filter impossible to express over the API.
+const STATUSES = new Set([
+  "pending",
+  "succeeded",
+  "failed",
+  "expired",
+  "refunded",
+  "partially_refunded",
+  "disputed",
+])
 
 /**
  * GET /api/v1/payments
@@ -17,10 +29,13 @@ export const GET = withApi(async ({ url, caller }) => {
 
   const status = params.get("status")
   if (status) {
-    const wanted = status.split(",").filter((s) => STATUSES.has(s))
-    if (wanted.length !== status.split(",").length)
+    const wanted = status.split(",").filter(Boolean)
+    if (wanted.some((s) => !STATUSES.has(s)))
       throw fail(400, "invalid_request_error", `Unknown status. Valid: ${[...STATUSES].join(", ")}`)
-    if (wanted.length) filters.push(eq(schema.tollboothPayments.status, wanted[0]!))
+    // Several statuses can be asked for at once, so match any of them. Filtering on
+    // just the first would silently ignore the rest of the request.
+    if (wanted.length === 1) filters.push(eq(schema.tollboothPayments.status, wanted[0]!))
+    else if (wanted.length > 1) filters.push(inArray(schema.tollboothPayments.status, wanted))
   }
 
   const customer = params.get("customer")

@@ -35,7 +35,7 @@ export const POST = withApi(async ({ caller, json }) => {
 
   const currency = String(body.currency ?? "usd").toLowerCase()
   if (!CURRENCIES.includes(currency as (typeof CURRENCIES)[number]))
-    throw fail(400, "invalid_request_error", `Unsupported currency "${currency}"`)
+    throw fail(400, "invalid_request_error", `Unsupported currency "${currency}". Supported: ${CURRENCIES.join(", ")}`)
 
   let productId: string | null = null
   if (body.product) {

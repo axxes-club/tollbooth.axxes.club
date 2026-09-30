@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { fail, jsonResponse, withApi } from "@/lib/api"
-import { CURRENCIES, currencyExponent } from "@/lib/fees"
+import { CURRENCIES, isUuid } from "@/lib/fees"
 import { createCheckout, NotReadyError, safeUrl } from "@/lib/payments"
 import { serializePayment } from "@/lib/api"
 
@@ -47,10 +47,12 @@ export const POST = withApi(async ({ req, caller, json }) => {
   if (body.price) {
     const reference = body.price
     const [byId, byLookup] = await Promise.all([
-      db
-        .select()
-        .from(schema.tollboothPrices)
-        .where(and(eq(schema.tollboothPrices.tenantId, caller.tenantId), eq(schema.tollboothPrices.id, reference))),
+      isUuid(reference)
+        ? db
+            .select()
+            .from(schema.tollboothPrices)
+            .where(and(eq(schema.tollboothPrices.tenantId, caller.tenantId), eq(schema.tollboothPrices.id, reference)))
+        : Promise.resolve([]),
       db
         .select()
         .from(schema.tollboothPrices)
@@ -85,6 +87,7 @@ export const POST = withApi(async ({ req, caller, json }) => {
   let customerId: string | null = null
   let customerEmail: string | null = null
   if (body.customer) {
+    if (!isUuid(body.customer)) throw fail(400, "invalid_request_error", "customer must be a customer id")
     const [customer] = await db
       .select()
       .from(schema.tollboothCustomers)
