@@ -9,6 +9,7 @@ export type NavItem = { href: string; label: string; icon?: React.ReactNode; gro
 type Props = {
   items: NavItem[]
   footer: React.ReactNode
+  apps?: React.ReactNode
   organization?: React.ReactNode
   logo: React.ReactNode
   /** Shown instead of `logo` when the rail is collapsed. */
@@ -54,7 +55,7 @@ function leadingGlyph(label: string) {
   return first.codePointAt(0)! > 0x2000 ? first : first.toUpperCase()
 }
 
-export function Sidebar({ items, footer, organization, logo, mark, activeAlso, storageKey = KEY }: Props) {
+export function Sidebar({ items, footer, apps, organization, logo, mark, activeAlso, storageKey = KEY }: Props) {
   const pathname = usePathname()
   const [open, setOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
@@ -225,6 +226,7 @@ export function Sidebar({ items, footer, organization, logo, mark, activeAlso, s
         {/* A 64px rail has no room for the account block, and Members hides it in
             exactly the same way, so the two rails read the same. */}
         <div className="mt-8 border-t border-line pt-4">
+          {apps}
           {organization}
           <div className={collapsed ? "lg:hidden" : ""}>{footer}</div>
         </div>

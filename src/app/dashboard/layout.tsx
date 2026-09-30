@@ -1,3 +1,4 @@
+import { AllAppsSwitcher } from "@/components/all-apps-switcher"
 import { OrgSwitcher } from "@/components/org-switcher"
 import type { Metadata } from "next"
 import { BrandScope } from "@/components/brand"
@@ -18,6 +19,7 @@ async function DashboardLayout({ children }: { children: React.ReactNode }) {
         items={items}
         logo={<Logo />}
         mark={<LogoMark />}
+        apps={<AllAppsSwitcher tenantId={ctx.tenant.id} />}
         organization={<OrgSwitcher current={{ tenantId: ctx.tenant.id, name: ctx.tenant.name, slug: ctx.tenant.slug, role: ctx.role, isPrimary: false }} memberships={ctx.memberships} />}
         footer={
           <div className="space-y-3 text-xs">
