@@ -1,3 +1,4 @@
+import { OrgSwitcher } from "@/components/org-switcher"
 import type { Metadata } from "next"
 import { BrandScope } from "@/components/brand"
 import { getCustomerBrand } from "@/lib/white-label"
@@ -17,10 +18,10 @@ async function DashboardLayout({ children }: { children: React.ReactNode }) {
         items={items}
         logo={<Logo />}
         mark={<LogoMark />}
+        organization={<OrgSwitcher current={{ tenantId: ctx.tenant.id, name: ctx.tenant.name, slug: ctx.tenant.slug, role: ctx.role, isPrimary: false }} memberships={ctx.memberships} />}
         footer={
           <div className="space-y-3 text-xs">
             <div>
-              <p className="font-medium text-text">{ctx.tenant.name}</p>
               <p className="truncate text-muted">{ctx.user.email}</p>
             </div>
             <div className="flex items-center justify-between">
