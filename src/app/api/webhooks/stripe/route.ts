@@ -3,6 +3,7 @@ import { and, eq, sql } from "drizzle-orm"
 import type Stripe from "stripe"
 import { db, schema } from "@/lib/db"
 import { stripe } from "@/lib/stripe"
+import { reconcileProviderRefund } from "@/lib/refunds"
 import { markSucceeded, markTerminal } from "@/lib/payments"
 import { deliverPending, emit, emitPayment } from "@/lib/webhooks"
 
@@ -136,6 +137,13 @@ async function handle(event: Stripe.Event) {
       break
     }
 
+    case "refund.updated":
+    case "refund.created":
+    case "refund.failed": {
+      await reconcileProviderRefund(event.data.object,event.livemode?"live":"test");
+      break;
+    }
+
     case "charge.refunded": {
       const charge = event.data.object
       const paymentIntent = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id
@@ -146,15 +154,15 @@ async function handle(event: Stripe.Event) {
       const [updated] = await db
         .update(payments)
         .set({
-          amountRefunded: charge.amount_refunded,
-          status: charge.refunded ? "refunded" : "partially_refunded",
+          amountRefunded: sql`greatest(${payments.amountRefunded},${charge.amount_refunded})`,
+          status:sql`case when ${payments.status}='disputed' then 'disputed' when greatest(${payments.amountRefunded},${charge.amount_refunded})>=${payments.amount} then 'refunded' else 'partially_refunded' end`,
           // Recompute from the total refunded, flooring — the same rule
           // `refundFeeDelta` uses. Rounding here would hand back more fee than was
           // charged once a payment is refunded in several parts.
-          netFee: sql`greatest(0, ${payments.applicationFee} - floor(${payments.applicationFee} * ${charge.amount_refunded} / greatest(${payments.amount}, 1)))`,
+          netFee: sql`greatest(0, ${payments.applicationFee} - floor(${payments.applicationFee} * greatest(${payments.amountRefunded},${charge.amount_refunded}) / greatest(${payments.amount}, 1)))`,
           updatedAt: now,
         })
-        .where(eq(payments.paymentIntentId, paymentIntent))
+        .where(and(eq(payments.paymentIntentId, paymentIntent),eq(payments.mode,event.livemode?"live":"test"),sql`${charge.amount_refunded} between 0 and ${payments.amount}`))
         .returning()
 
       if (updated) {

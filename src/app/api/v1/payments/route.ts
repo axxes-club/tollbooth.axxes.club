@@ -25,7 +25,7 @@ const STATUSES = new Set([
  */
 export const GET = withApi(async ({ url, caller }) => {
   const params = url.searchParams
-  const filters: (SQL | undefined)[] = []
+  const filters: (SQL | undefined)[] = [eq(schema.tollboothPayments.mode,caller.mode)]
 
   const status = params.get("status")
   if (status) {
@@ -45,6 +45,7 @@ export const GET = withApi(async ({ url, caller }) => {
 
   const mode = params.get("mode")
   if (mode) {
+    if(mode!==caller.mode)throw fail(400,"invalid_request_error","mode must match the API key");
     if (mode !== "live" && mode !== "test") throw fail(400, "invalid_request_error", 'mode must be "live" or "test"')
     filters.push(eq(schema.tollboothPayments.mode, mode))
   }

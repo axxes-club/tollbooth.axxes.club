@@ -40,7 +40,43 @@
         "ci-check:$BUILD_ID",
         "sh",
         "-ec",
-        "rm -f .env .env.*; node --test scripts/check-account-contract.mjs && npm test && npm run typecheck"
+        "rm -f .env .env.*; node --test scripts/schema-readiness.check.cjs scripts/check-idempotency-recovery.mjs scripts/check-account-contract.mjs && npm test && npm run typecheck"
+      ]
+    },
+    {
+      "id": "financial-postgres-tests",
+      "name": "gcr.io/cloud-builders/docker",
+      "entrypoint": "sh",
+      "args": [
+        "-ec",
+        "docker run -d --rm --name financial-db -e POSTGRES_PASSWORD=financial-test-only postgres:17; trap \"docker stop financial-db\" EXIT; for i in $$(seq 1 60); do docker exec financial-db pg_isready -U postgres && break; sleep 1; done; docker exec -i financial-db psql -v ON_ERROR_STOP=1 -U postgres < scripts/create-tables.sql; docker run --rm --network container:financial-db -e DATABASE_URL=postgres://postgres:financial-test-only@127.0.0.1:5432/postgres ci-check:$BUILD_ID sh -ec \"rm -f .env .env.*; npm test\""
+      ]
+    },
+    {
+      "id": "install-schema-proxy",
+      "name": "gcr.io/cloud-builders/docker",
+      "entrypoint": "sh",
+      "args": [
+        "-ec",
+        "docker create --name schema-proxy-binary gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.26.0 >/dev/null; trap \"docker rm -f schema-proxy-binary >/dev/null\" EXIT; docker cp schema-proxy-binary:/cloud-sql-proxy /workspace/.ci-cloud-sql-proxy; chmod 755 /workspace/.ci-cloud-sql-proxy"
+      ]
+    },
+    {
+      "id": "active-source-schema-readiness",
+      "name": "gcr.io/cloud-builders/docker",
+      "args": [
+        "run",
+        "--rm",
+        "--network",
+        "cloudbuild",
+        "-v",
+        "/workspace/.env.production:/run/secrets/build-env:ro",
+        "-v",
+        "/workspace/.ci-cloud-sql-proxy:/run/cloudsql-proxy:ro",
+        "ci-check:$BUILD_ID",
+        "node",
+        "scripts/schema-readiness.cjs",
+        "tollbooth"
       ]
     },
     {
@@ -84,7 +120,7 @@
       "entrypoint": "bash",
       "args": [
         "-ec",
-        "rm -f .ci-image.tar .env.production"
+        "rm -f .ci-image.tar .env.production .ci-cloud-sql-proxy"
       ]
     },
     {

@@ -149,6 +149,7 @@ export const tollboothPayments = pgTable(
     currency: text("currency").notNull(),
     applicationFee: integer("application_fee").notNull().default(0),
     amountRefunded: integer("amount_refunded").notNull().default(0),
+    pendingRefundId: uuid("pending_refund_id"),
     /** What the platform actually earned, after refunds handed part of the fee back. */
     netFee: integer("net_fee").notNull().default(0),
     description: text("description"),
@@ -270,6 +271,8 @@ export const tollboothIdempotencyKeys = pgTable(
   "tollbooth_idempotency_keys",
   {
     key: text("key").primaryKey(),
+    leaseToken:uuid("lease_token"),
+    mode:text("mode").$type<TbMode>(),
     tenantId: uuid("tenant_id").notNull(),
     apiKeyId: uuid("api_key_id"),
     method: text("method").notNull(),

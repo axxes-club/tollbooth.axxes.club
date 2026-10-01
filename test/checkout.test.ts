@@ -115,7 +115,7 @@ describe("checkout", { skip }, () => {
 
   test("a Stripe failure marks the payment failed rather than leaving it hanging", async () => {
     __stripe.on("checkout.sessions.create", () => {
-      throw new Error("Your card was declined")
+      throw Object.assign(new Error("Your card was declined"),{type:"StripeInvalidRequestError"})
     })
     await assert.rejects(ready(), /declined/)
 

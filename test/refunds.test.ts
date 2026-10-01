@@ -109,7 +109,7 @@ describe("refunds", { skip }, () => {
   test("a Stripe failure releases the reservation instead of stranding it", async () => {
     const payment = await paidPayment(2500)
     __stripe.on("refunds.create", () => {
-      throw new Error("insufficient_funds")
+      throw Object.assign(new Error("insufficient_funds"),{type:"StripeInvalidRequestError"})
     })
     await assert.rejects(createRefund({ tenantId: TENANT, paymentId: payment.id, amount: 1000, createdByKind: "api" }), /insufficient_funds/)
 

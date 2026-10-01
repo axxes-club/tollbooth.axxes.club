@@ -134,13 +134,14 @@ export function withApi<P = Record<string, never>>(
         key: idemKey,
         tenantId: caller.tenantId,
         apiKeyId: caller.apiKeyId,
+        mode: caller.mode,
         method: req.method,
         path: url.pathname,
         requestHash: await requestFingerprint(req),
         requestId,
         headers: rateHeaders,
-        run: async () => {
-          const res = await run(null)
+        run: async (guard) => {
+          const res = await run(guard)
           return { status: res.status, body: await res.clone().json().catch(() => ({})) }
         },
       })

@@ -12,7 +12,7 @@ import { serializePayment } from "@/lib/api"
  * checkout URL. The caller redirects the buyer there and gets a `payment.succeeded`
  * webhook. Send an `Idempotency-Key` so a retry can't charge twice.
  */
-export const POST = withApi(async ({ req, caller, json }) => {
+export const POST = withApi(async ({ req, caller, json, idempotency }) => {
   const body = await json<{
     amount?: number
     price?: string
@@ -120,6 +120,7 @@ export const POST = withApi(async ({ req, caller, json }) => {
   try {
     const payment = await createCheckout({
       tenantId: caller.tenantId,
+      operation:idempotency,
       mode: caller.mode,
       apiKeyId: caller.apiKeyId,
       amount: amount!,

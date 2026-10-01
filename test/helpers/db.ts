@@ -7,7 +7,7 @@
  * two globally-unique tables, so a run can never touch real data or another suite.
  */
 import { createHash } from "node:crypto"
-import { neon } from "@neondatabase/serverless"
+import { Pool } from "pg"
 
 /** Tables the tests write to, all of which carry a tenant. */
 const TENANT_TABLES = [
@@ -45,22 +45,21 @@ export function hasDatabase() {
   return Boolean(process.env.DATABASE_URL)
 }
 
-export function sql() {
-  if (!hasDatabase()) throw new Error("DATABASE_URL is not set")
-  return neon(process.env.DATABASE_URL!)
+const pools=new Map<string,Pool>();
+export function sql(){
+ if(!hasDatabase())throw new Error('Disposable DATABASE_URL required');
+ const url=process.env.DATABASE_URL!;if(!['localhost','127.0.0.1'].includes(new URL(url).hostname))throw new Error('Tests only write disposable localhost PostgreSQL');
+ let pool=pools.get(url);if(!pool){pool=new Pool({connectionString:url,max:2,idleTimeoutMillis:100,allowExitOnIdle:true});pools.set(url,pool);}
+ return{query:async(text:string,params?:unknown[])=>{const result=await pool!.query(text,params);return result.rows;}};
 }
 
 /** Removes everything a suite created, and nothing belonging to another. */
 export async function resetTestData(suite: Suite) {
   if (!hasDatabase()) return
   const db = sql()
-  // One atomic HTTP transaction retains the deletion order and suite scoping,
-  // without twelve network round trips before every test.
-  await db.transaction([
-    ...TENANT_TABLES.map((table) => db.query(`delete from ${table} where tenant_id = $1`, [suite.tenant])),
-    db.query(`delete from tollbooth_idempotency_keys where tenant_id = $1`, [suite.tenant]),
-    db.query(`delete from tollbooth_events where id like $1`, [`${suite.eventPrefix}%`]),
-  ])
+  for(const table of TENANT_TABLES)await db.query(`delete from ${table} where tenant_id=$1`,[suite.tenant]);
+  await db.query('delete from tollbooth_idempotency_keys where tenant_id=$1',[suite.tenant]);
+  await db.query('delete from tollbooth_events where id like $1',[`${suite.eventPrefix}%`]);
 }
 
 /** A connected account that reports itself ready to take charges. */

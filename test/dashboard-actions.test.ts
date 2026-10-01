@@ -50,8 +50,10 @@ describe("dashboard actions", { skip: !process.env.DATABASE_URL }, () => {
   })
 
   test("JPY refunds are parsed in the owned payment currency", async () => {
-    const [payment] = await sql().query("insert into tollbooth_payments (tenant_id, amount, currency, status, payment_intent_id) values ($1, 1000, 'jpy', 'succeeded', 'pi_jpy') returning id", [SUITE.tenant])
+    const [payment] = await sql().query("insert into tollbooth_payments (tenant_id, amount, currency, status, payment_intent_id,mode) values ($1, 1000, 'jpy', 'succeeded', 'pi_jpy','test') returning id", [SUITE.tenant])
     const form = new FormData()
+    __stripe.on("refunds.create",()=>({currency:"jpy"}));
+    __stripe.on("charges.retrieve",()=>({payment_intent:"pi_jpy",currency:"jpy",livemode:false,amount_refunded:100}));
     form.set("payment_id", payment.id)
     form.set("amount", "100")
     assert.equal((await actions.refundPayment(form)).ok, true)

@@ -1,9 +1,10 @@
 import "server-only"
-import { eq } from "drizzle-orm"
+import {randomUUID} from "node:crypto"
+import { and, eq, lt, isNull } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 
 /** Handed to a handler so it can tell whether this request is the first attempt. */
-export type IdempotencyGuard = { key: string; isReplay: false }
+export type IdempotencyGuard = { key:string;isReplay:boolean;checkpoint:Record<string,unknown>|null;assertOwnership:()=>Promise<void>;saveCheckpoint:(value:Record<string,unknown>)=>Promise<void> }
 
 type Args = {
   key: string
@@ -15,7 +16,8 @@ type Args = {
   requestId: string
   /** Headers to carry on every response, including replays (e.g. rate-limit state). */
   headers?: Record<string, string>
-  run: () => Promise<{ status: number; body: Record<string, unknown> }>
+  mode?: "test" | "live"
+  run: (guard:IdempotencyGuard) => Promise<{ status: number; body: Record<string, unknown> }>
 }
 
 /** A lock older than this means the first attempt died, and the key may be reused. */
@@ -42,32 +44,33 @@ export async function withIdempotency(args: Args): Promise<Response> {
   const { key, tenantId, apiKeyId, method, path, requestHash, requestId, headers } = args
   if (key.length > 255) throw new IdempotencyError("Idempotency-Key must be 255 characters or fewer")
 
+  const leaseToken=randomUUID();
   const [claimed] = await db
     .insert(schema.tollboothIdempotencyKeys)
-    .values({ key, tenantId, apiKeyId, method, path, requestHash })
+    .values({ key, tenantId, apiKeyId, method, path, requestHash,leaseToken,mode:args.mode??null })
     .onConflictDoNothing()
     .returning()
 
-  if (claimed) {
-    try {
-      const result = await args.run()
-      await db
-        .update(schema.tollboothIdempotencyKeys)
-        .set({ responseStatus: result.status, responseBody: result.body, completedAt: new Date() })
-        .where(eq(schema.tollboothIdempotencyKeys.key, key))
-      return json(result.status, result.body, { "idempotent-replay": "false" }, requestId, headers)
-    } catch (err) {
-      // A failed request must not poison the key: release it so the caller can retry.
-      await db.delete(schema.tollboothIdempotencyKeys).where(eq(schema.tollboothIdempotencyKeys.key, key)).catch(() => {})
-      throw err
-    }
+  const identity=()=>and(eq(schema.tollboothIdempotencyKeys.tenantId,tenantId),eq(schema.tollboothIdempotencyKeys.method,method),eq(schema.tollboothIdempotencyKeys.path,path),eq(schema.tollboothIdempotencyKeys.requestHash,requestHash),args.mode?eq(schema.tollboothIdempotencyKeys.mode,args.mode):undefined);
+  function validate(row:KeyRow){if(row.tenantId!==tenantId||row.requestHash!==requestHash||row.method!==method||row.path!==path||(args.mode&&(row.mode??row.responseBody?.mode)!==args.mode))throw new IdempotencyError('That Idempotency-Key was already used with a different request body');}
+  async function execute(checkpoint:Record<string,unknown>|null,isReplay:boolean){
+    const owner=()=>and(eq(schema.tollboothIdempotencyKeys.key,key),eq(schema.tollboothIdempotencyKeys.leaseToken,leaseToken),identity(),isNull(schema.tollboothIdempotencyKeys.completedAt));
+    const guard:IdempotencyGuard={key,isReplay,checkpoint,assertOwnership:async()=>{const [owned]=await db.update(schema.tollboothIdempotencyKeys).set({lockedAt:new Date()}).where(owner()).returning();if(!owned)throw new IdempotencyInProgressError();},saveCheckpoint:async(value)=>{
+      const saved={...value,preparedAt:guard.checkpoint?.preparedAt??new Date().toISOString()};
+      if(JSON.stringify(saved).length>16384)throw new IdempotencyError('Operation checkpoint is too large');
+      const [owned]=await db.update(schema.tollboothIdempotencyKeys).set({responseBody:saved,lockedAt:new Date()}).where(owner()).returning();if(!owned)throw new IdempotencyInProgressError();guard.checkpoint=saved;
+    }};
+    try{const result=await args.run(guard);const [finished]=await db.update(schema.tollboothIdempotencyKeys).set({responseStatus:result.status,responseBody:result.body,completedAt:new Date()}).where(owner()).returning();if(!finished)throw new IdempotencyInProgressError();return json(result.status,result.body,{'idempotent-replay':isReplay?'true':'false'},requestId,headers);}
+    catch(error){if(guard.checkpoint){await db.update(schema.tollboothIdempotencyKeys).set({lockedAt:new Date(0)}).where(owner()).catch(()=>{});}else{await db.delete(schema.tollboothIdempotencyKeys).where(owner()).catch(()=>{});}throw error;}
   }
+  if(claimed)return execute(null,false);
 
   const [existing] = await db.select().from(schema.tollboothIdempotencyKeys).where(eq(schema.tollboothIdempotencyKeys.key, key))
 
   if (!existing) throw new IdempotencyError("Could not record this Idempotency-Key. Retry the request.")
+  validate(existing);
   if (existing.tenantId !== tenantId) throw new IdempotencyError("That Idempotency-Key belongs to a different workspace")
-  if (existing.requestHash !== requestHash) {
+  if (existing.requestHash !== requestHash || existing.method!==method || existing.path!==path || (args.mode && (existing.mode??existing.responseBody?.mode)!==args.mode)) {
     throw new IdempotencyError("That Idempotency-Key was already used with a different request body")
   }
 
@@ -80,6 +83,7 @@ export async function withIdempotency(args: Args): Promise<Response> {
       const settled = await waitForCompletion(key)
 
       if (settled?.completedAt) {
+        validate(settled);
         return json(
           settled.responseStatus ?? 200,
           settled.responseBody ?? {},
@@ -95,16 +99,13 @@ export async function withIdempotency(args: Args): Promise<Response> {
       }
 
       // The row disappeared, so the first attempt failed and released the key.
-      // Fall through and try to claim it again.
+      return withIdempotency(args);
     } else {
-      // The lock is older than the TTL: the first attempt died mid-flight and left
-      // the key stranded. Re-run it under the same key.
-      const result = await args.run()
-      await db
-        .update(schema.tollboothIdempotencyKeys)
-        .set({ responseStatus: result.status, responseBody: result.body, lockedAt: new Date(), completedAt: new Date() })
-        .where(eq(schema.tollboothIdempotencyKeys.key, key))
-      return json(result.status, result.body, { "idempotent-replay": "false" }, requestId, headers)
+      // Atomically acquire the expired lease. Recovery uses its durable domain checkpoint.
+      const [leased]=await db.update(schema.tollboothIdempotencyKeys).set({lockedAt:new Date(),leaseToken}).where(and(eq(schema.tollboothIdempotencyKeys.key,key),identity(),lt(schema.tollboothIdempotencyKeys.lockedAt,new Date(Date.now()-LOCK_TTL_MS)),isNull(schema.tollboothIdempotencyKeys.completedAt))).returning();
+      if(!leased)throw new IdempotencyInProgressError();
+      validate(leased);
+      return execute(leased.responseBody??null,true);
     }
   }
 
