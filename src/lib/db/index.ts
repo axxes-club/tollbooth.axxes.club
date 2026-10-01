@@ -1,9 +1,33 @@
-import { neon } from "@neondatabase/serverless"
-import { drizzle } from "drizzle-orm/neon-http"
-import * as schema from "./schema"
+import { neon } from "@neondatabase/serverless";
+import { drizzle } from "drizzle-orm/neon-http";
+import { drizzle as drizzlePg } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+import * as schema from "./schema";
 
-// Placeholder keeps `next build` working when DATABASE_URL isn't set.
-const sql = neon(process.env.DATABASE_URL || "postgresql://placeholder:placeholder@placeholder/placeholder")
+const url = process.env.DATABASE_URL || "postgresql://build:build@localhost/build";
+const usesNeon = new URL(url).hostname.endsWith(".neon.tech");
+const neonDb = () => drizzle(neon(url), { schema });
+const globalForDb = globalThis as unknown as { axxesPgPool?: Pool };
 
-export const db = drizzle(sql, { schema })
+// Reuse one bounded pool per process, including separately loaded route bundles.
+function postgresDb() {
+  const pool = globalForDb.axxesPgPool ??= new Pool({
+    connectionString: url,
+    max: 2,
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 30_000,
+  });
+  if (pool.listenerCount("error") === 0) {
+    pool.on("error", (error: NodeJS.ErrnoException) => {
+      console.error("[db] PostgreSQL idle connection error", { code: error.code ?? "unknown" });
+    });
+  }
+  return drizzlePg(pool, { schema });
+}
+
+// Both connections expose the existing Drizzle query API during the cutover.
+export const db: ReturnType<typeof neonDb> = usesNeon
+  ? neonDb()
+  : postgresDb() as unknown as ReturnType<typeof neonDb>;
+
 export { schema }
