@@ -17,6 +17,11 @@ function postgresDb() {
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,
   });
+  if (pool.listenerCount("error") === 0) {
+    pool.on("error", (error: NodeJS.ErrnoException) => {
+      console.error("[db] PostgreSQL idle connection error", { code: error.code ?? "unknown" });
+    });
+  }
   return drizzlePg(pool, { schema });
 }
 
