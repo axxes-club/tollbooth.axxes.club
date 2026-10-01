@@ -69,3 +69,10 @@ body {
   background-image: radial-gradient(circle at 1px 1px, var(--line) 1px, transparent 0);
   background-size: 32px 32px;
 }
+
+/* Keep the organization control reachable when the desktop rail is collapsed. */
+@media (min-width: 1024px) {
+  aside[data-collapsed="true"] .org-details, .org-switcher[data-compact="true"] .org-details { display: none; }
+  aside[data-collapsed="true"] .org-monogram, .org-switcher[data-compact="true"] .org-monogram { display: grid; }
+  aside[data-collapsed="true"] .org-trigger, .org-switcher[data-compact="true"] .org-trigger { justify-content: center; border: 0; padding: 0; }
+}

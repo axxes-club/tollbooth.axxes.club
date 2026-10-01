@@ -9,6 +9,8 @@ export type NavItem = { href: string; label: string; icon?: React.ReactNode; gro
 type Props = {
   items: NavItem[]
   footer: React.ReactNode
+  apps?: React.ReactNode
+  organization?: React.ReactNode
   logo: React.ReactNode
   /** Shown instead of `logo` when the rail is collapsed. */
   mark?: React.ReactNode
@@ -53,7 +55,7 @@ function leadingGlyph(label: string) {
   return first.codePointAt(0)! > 0x2000 ? first : first.toUpperCase()
 }
 
-export function Sidebar({ items, footer, logo, mark, activeAlso, storageKey = KEY }: Props) {
+export function Sidebar({ items, footer, apps, organization, logo, mark, activeAlso, storageKey = KEY }: Props) {
   const pathname = usePathname()
   const [open, setOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
@@ -167,7 +169,7 @@ export function Sidebar({ items, footer, logo, mark, activeAlso, storageKey = KE
         data-collapsed={collapsed}
         className={`${
           open ? "flex" : "hidden"
-        } fixed inset-y-0 left-0 z-30 w-72 max-w-[85vw] flex-col overflow-y-auto overscroll-contain border-r border-line bg-panel p-4 pb-[max(1rem,env(safe-area-inset-bottom))] lg:sticky lg:top-0 lg:flex lg:h-dvh lg:w-64 lg:max-w-none lg:shrink-0 lg:overflow-visible lg:transition-[width] lg:duration-200 ${
+        } fixed inset-y-0 left-0 z-30 w-72 max-w-[85vw] flex-col overflow-y-auto overscroll-contain border-r border-line bg-panel p-4 pb-[max(1rem,env(safe-area-inset-bottom))] lg:sticky lg:top-0 lg:flex lg:h-dvh lg:max-w-none lg:shrink-0 lg:overflow-visible lg:transition-[width] lg:duration-200 ${
           collapsed ? "lg:w-16" : "lg:w-64"
         }`}
       >
@@ -223,7 +225,11 @@ export function Sidebar({ items, footer, logo, mark, activeAlso, storageKey = KE
 
         {/* A 64px rail has no room for the account block, and Members hides it in
             exactly the same way, so the two rails read the same. */}
-        {!collapsed && <div className="mt-8 border-t border-line pt-4">{footer}</div>}
+        <div className="mt-8 border-t border-line pt-4">
+          {apps}
+          {organization}
+          <div className={collapsed ? "lg:hidden" : ""}>{footer}</div>
+        </div>
 
         {/* The recognisable AXXES control: a round button riding the rail's edge. */}
         <button
