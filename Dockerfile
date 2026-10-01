@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # AXXES Next.js image for Cloud Run (standalone output, glibc for sharp/Prisma).
 # Build-time env (NEXT_PUBLIC_* etc.) comes from .env.production, written by
 # Cloud Build from Secret Manager; it never reaches the final image.
@@ -10,7 +11,8 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN if [ -f package-lock.json ]; then npm ci || npm install --no-audit --no-fund; \
     else corepack enable && pnpm install --frozen-lockfile; fi
 RUN mkdir -p public && if [ -d prisma ]; then npx prisma generate; fi
-RUN if [ -f package-lock.json ]; then npm run build; else pnpm run build; fi
+RUN --mount=type=secret,id=build-env,target=/app/.env.production if [ -f package-lock.json ]; then npm run build; else pnpm run build; fi \
+  && rm -f .next/standalone/.env .next/standalone/.env.*
 
 FROM node:24-slim
 WORKDIR /app
