@@ -1,0 +1,140 @@
+{
+  "substitutions": {
+    "_TAG": "manual"
+  },
+  "steps": [
+    {
+      "id": "build-env",
+      "name": "gcr.io/google.com/cloudsdktool/cloud-sdk:slim",
+      "entrypoint": "bash",
+      "args": [
+        "-ec",
+        "umask 077; gcloud secrets versions access latest --secret=tollbooth-v2-env > .env.staging-product; gcloud secrets versions access latest --secret=v2-db-env > .env.staging-database"
+      ]
+    },
+    {
+      "id": "merge-staging-env",
+      "name": "node:24-bookworm-slim",
+      "entrypoint": "node",
+      "args": [
+        "scripts/gcp-staging-env.mjs",
+        ".env.staging-product",
+        ".env.staging-database",
+        ".env.production"
+      ]
+    },
+    {
+      "id": "staging-env-tests",
+      "name": "node:24-bookworm-slim",
+      "entrypoint": "node",
+      "args": [
+        "--test",
+        "scripts/test-gcp-staging-env.mjs"
+      ]
+    },
+    {
+      "id": "linux-build-and-check",
+      "name": "gcr.io/cloud-builders/docker",
+      "args": [
+        "build",
+        "--secret",
+        "id=build-env,src=.env.production",
+        "--target",
+        "build",
+        "-t",
+        "ci-check:$BUILD_ID",
+        "-f",
+        "Dockerfile.v2",
+        "."
+      ],
+      "env": [
+        "DOCKER_BUILDKIT=1"
+      ]
+    },
+    {
+      "id": "unit-tests",
+      "name": "gcr.io/cloud-builders/docker",
+      "args": [
+        "run",
+        "--rm",
+        "--env",
+        "AUTH_SECRET=gcp-ci-unit-test-secret-not-a-runtime-credential",
+        "ci-check:$BUILD_ID",
+        "sh",
+        "-ec",
+        "rm -f .env .env.*; node --test scripts/check-account-contract.mjs && npm test && npm run typecheck"
+      ]
+    },
+    {
+      "id": "runtime-image",
+      "name": "gcr.io/cloud-builders/docker",
+      "args": [
+        "build",
+        "--secret",
+        "id=build-env,src=.env.production",
+        "-t",
+        "us-west1-docker.pkg.dev/$PROJECT_ID/ci-tollbooth-v2/tollbooth-v2:${_TAG}-$BUILD_ID",
+        "-f",
+        "Dockerfile.v2",
+        "."
+      ],
+      "env": [
+        "DOCKER_BUILDKIT=1"
+      ]
+    },
+    {
+      "id": "export-runtime-layers",
+      "name": "gcr.io/cloud-builders/docker",
+      "args": [
+        "save",
+        "-o",
+        ".ci-image.tar",
+        "us-west1-docker.pkg.dev/$PROJECT_ID/ci-tollbooth-v2/tollbooth-v2:${_TAG}-$BUILD_ID"
+      ]
+    },
+    {
+      "id": "verify-no-secret-layers",
+      "name": "gcr.io/google.com/cloudsdktool/cloud-sdk:slim",
+      "entrypoint": "python3",
+      "args": [
+        "scripts/gcp-scan-image.py",
+        ".ci-image.tar",
+        ".env.production"
+      ]
+    },
+    {
+      "id": "remove-build-inputs",
+      "name": "gcr.io/google.com/cloudsdktool/cloud-sdk:slim",
+      "entrypoint": "bash",
+      "args": [
+        "-ec",
+        "rm -f .ci-image.tar .env.production"
+      ]
+    },
+    {
+      "id": "push-image",
+      "name": "gcr.io/cloud-builders/docker",
+      "args": [
+        "push",
+        "us-west1-docker.pkg.dev/$PROJECT_ID/ci-tollbooth-v2/tollbooth-v2:${_TAG}-$BUILD_ID"
+      ]
+    },
+    {
+      "id": "release",
+      "name": "gcr.io/google.com/cloudsdktool/cloud-sdk:slim",
+      "entrypoint": "bash",
+      "args": [
+        "-c",
+        "set -euo pipefail\nimage='us-west1-docker.pkg.dev/$PROJECT_ID/ci-tollbooth-v2/tollbooth-v2:${_TAG}-$BUILD_ID'\ndigest=$(gcloud artifacts docker images describe \"$$image\" --format='value(image_summary.digest)')\nexport CI_SERVICE='tollbooth-v2' CI_BUILD_ID='$BUILD_ID' CI_IMAGE=\"$${image%:*}@$$digest\"\npython3 scripts/gcp-release.py\n"
+      ]
+    }
+  ],
+  "images": [
+    "us-west1-docker.pkg.dev/$PROJECT_ID/ci-tollbooth-v2/tollbooth-v2:${_TAG}-$BUILD_ID"
+  ],
+  "options": {
+    "machineType": "E2_HIGHCPU_8",
+    "logging": "CLOUD_LOGGING_ONLY"
+  },
+  "timeout": "1800s"
+}
