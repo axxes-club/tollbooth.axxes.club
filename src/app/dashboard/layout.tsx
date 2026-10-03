@@ -1,3 +1,4 @@
+import { PulseTracker } from "@/components/pulse-tracker"
 import { AllAppsSwitcher } from "@/components/all-apps-switcher"
 import { OrgSwitcher } from "@/components/org-switcher"
 import type { Metadata } from "next"
@@ -15,6 +16,7 @@ async function DashboardLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="lg:flex">
+      <PulseTracker appKey="tollbooth" tenantId={ctx.tenant.id} userId={ctx.userId}/>
       <Sidebar
         items={items}
         logo={<Logo />}
