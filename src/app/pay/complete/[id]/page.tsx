@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
-import { formatMoney } from "@/lib/fees"
+import { formatMoney, isUuid } from "@/lib/fees"
 import { Logo } from "@/components/logo"
+import { PaymentRefresh } from "./payment-refresh"
 
 export const metadata = { title: "Thank you" }
 
@@ -15,12 +16,12 @@ export const metadata = { title: "Thank you" }
  */
 export default async function CompletePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const [payment] = await db.select().from(schema.tollboothPayments).where(eq(schema.tollboothPayments.id, id))
+  const [payment] = isUuid(id) ? await db.select().from(schema.tollboothPayments).where(eq(schema.tollboothPayments.id, id)) : []
 
   if (!payment) {
     return (
       <Shell title="We couldn't find that payment" tone="warn">
-        <p className="text-sm text-muted">If you were charged, you&apos;ll get an email receipt shortly. Nothing more to do.</p>
+        <p className="text-sm text-muted">We can&apos;t confirm this payment. If you see a charge, contact the seller with your payment reference.</p>
       </Shell>
     )
   }
@@ -29,27 +30,37 @@ export default async function CompletePage({ params }: { params: Promise<{ id: s
     return (
       <Shell title="Confirming your payment" tone="pending">
         <p className="text-sm text-muted">
-          We&apos;re waiting for {payment.customerEmail ?? "your bank"} to confirm. This usually takes a few seconds. You can safely close this
-          page — we&apos;ll email a receipt either way.
+          Confirmation is still pending. You can safely close this page. Contact the seller if the status does not update; avoid paying again while it is pending.
         </p>
+        <PaymentRefresh />
       </Shell>
     )
   }
 
+  const outcomes: Record<string, { title: string; message: string; tone: "good" | "warn" | "pending" }> = {
+    partially_refunded: { title: "Payment partially refunded", message: "Part of your payment has been refunded. Contact the seller with any questions.", tone: "good" },
+    refunded: { title: "Payment refunded", message: "Your payment has been refunded. Your bank determines when the refund appears.", tone: "good" },
+    disputed: { title: "Payment under dispute", message: "This payment is under dispute. Contact the seller or your bank for help.", tone: "warn" },
+    expired: { title: "Checkout expired", message: "This checkout is no longer available. Return to the seller to start a new checkout.", tone: "warn" },
+    failed: { title: "Payment could not be completed", message: "Contact the seller if you see a charge or a temporary bank hold before trying again.", tone: "warn" },
+  }
   if (payment.status !== "succeeded") {
+    const outcome = outcomes[payment.status] ?? { title: "Payment status unavailable", message: "Contact the seller to confirm the outcome before paying again.", tone: "warn" as const }
     return (
-      <Shell title="That payment didn't go through" tone="warn">
-        <p className="text-sm text-muted">No money was taken. If this keeps happening, try a different card or contact the seller.</p>
+      <Shell title={outcome.title} tone={outcome.tone}>
+        <p className="text-sm text-muted">{outcome.message}</p>
+        {payment.status === "partially_refunded" && <p className="mt-4 text-sm">Original payment {formatMoney(payment.amount, payment.currency, payment.mode as "live" | "test")}</p>}
+        {payment.amountRefunded > 0 && <p className="mt-4 text-sm">Refunded {formatMoney(payment.amountRefunded, payment.currency, payment.mode as "live" | "test")}</p>}
       </Shell>
     )
   }
 
   return (
     <Shell title="Payment received" tone="good">
-      <p className="text-3xl font-semibold tabular-nums">{formatMoney(payment.amount, payment.currency)}</p>
+      <p className="text-3xl font-semibold tabular-nums">{formatMoney(payment.amount, payment.currency, payment.mode as "live" | "test")}</p>
       <p className="mt-2 text-sm text-muted">{payment.description}</p>
       <p className="mt-6 text-xs text-muted">
-        Receipt sent to {payment.customerEmail ?? "your email"}. Reference <code className="font-mono">{payment.id.slice(0, 8)}</code>
+        Reference <code className="font-mono">{payment.id}</code>. Keep this reference if you need to contact the seller.
       </p>
     </Shell>
   )

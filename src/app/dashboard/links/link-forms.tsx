@@ -19,9 +19,10 @@ export function LinkForm({ prices, baseUrl }: { prices: Price[]; baseUrl: string
       className="card space-y-4 p-5"
       onSubmit={(e) => {
         e.preventDefault()
+        const data = new FormData(e.currentTarget)
         setError(null)
         start(async () => {
-          const result = await createLink(new FormData(e.currentTarget))
+          const result = await createLink(data)
           if (result.ok && result.data) {
             setCreated(result.data.url)
             router.refresh()

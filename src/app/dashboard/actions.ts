@@ -6,13 +6,14 @@ import { revalidatePath } from "next/cache"
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { requireContext } from "@/lib/context"
-import { stripe } from "@/lib/stripe"
+import { stripe, stripeMode } from "@/lib/stripe"
 import { generateApiKey, generateWebhookSecret, scopesForWrite, type Scope } from "@/lib/api-keys"
 import { createRefund, RefundError } from "@/lib/refunds"
 import { safeUrl } from "@/lib/payments"
 import { uniqueLinkSlug } from "@/lib/slugs"
-import { deliverPending } from "@/lib/webhooks"
-import { CURRENCIES } from "@/lib/fees"
+import { replayDelivery, sendEndpointTest, WEBHOOK_EVENTS } from "@/lib/webhooks"
+import { syncAccount } from "@/lib/accounts"
+import { CURRENCIES, parseMoney, minimumCharge, formatMoney, isUuid } from "@/lib/fees"
 import type { TbMode } from "@/lib/db/schema/tollbooth"
 
 const MANAGER_ROLES = new Set(["owner", "admin"])
@@ -34,46 +35,6 @@ const bad = (e: unknown) => (e instanceof Error ? e.message : "Something went wr
 
 // ------------------------------------------------------------------- payouts
 
-/**
- * Syncs the workspace's Stripe account state, balance and next payout.
- *
- * Reads happen on demand rather than being trusted from a cached web event, so the
- * number on the dashboard is the number Stripe would tell you right now.
- */
-export async function syncAccount(tenantId: string, mode: TbMode = "live") {
-  const [account] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, tenantId))
-  if (!account) return null
-
-  const client = stripe(mode)
-  const [remote, balance, payouts] = await Promise.all([
-    client.accounts.retrieve(account.stripeAccountId),
-    client.balance.retrieve({}, { stripeAccount: account.stripeAccountId }),
-    client.payouts.list({ limit: 1 }, { stripeAccount: account.stripeAccountId }),
-  ])
-
-  const next = payouts.data[0]
-  const [updated] = await db
-    .update(schema.tollboothAccounts)
-    .set({
-      chargesEnabled: remote.charges_enabled ? 1 : 0,
-      payoutsEnabled: remote.payouts_enabled ? 1 : 0,
-      detailsSubmitted: remote.details_submitted ? 1 : 0,
-      country: remote.country ?? null,
-      defaultCurrency: remote.default_currency ?? null,
-      chargesDisabledReason: (remote as { charges_disabled_reason?: string | null }).charges_disabled_reason ?? null,
-      requirementsDue: (remote.requirements?.currently_due ?? []) as string[],
-      balanceAvailable: balance.available[0]?.amount ?? 0,
-      balancePending: balance.pending[0]?.amount ?? 0,
-      nextPayoutAt: next?.arrival_date ? new Date(next.arrival_date * 1000) : null,
-      payoutSchedule: (remote.settings?.payouts?.schedule as string | undefined) ?? null,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.tollboothAccounts.tenantId, tenantId))
-    .returning()
-
-  return updated
-}
-
 export async function refreshAccount(): Promise<ActionResult> {
   const ctx = await requireContext()
   try {
@@ -93,7 +54,8 @@ export async function refreshAccountAction() {
 /** Creates the Express account on first use, then sends the owner through Stripe. */
 export async function startOnboarding(formData?: FormData) {
   const ctx = await requireManager()
-  const mode = (formData?.get("mode") as TbMode) ?? "live"
+  const mode = formData?.get("mode") ?? stripeMode()
+  if (mode !== "live" && mode !== "test") throw new Error("Choose test or live mode")
   let [account] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, ctx.tenant.id))
 
   if (!account) {
@@ -124,7 +86,7 @@ export async function openStripeDashboard() {
   const ctx = await requireManager()
   const [account] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, ctx.tenant.id))
   if (!account?.detailsSubmitted) throw new Error("Finish payout setup first")
-  const link = await stripe().accounts.createLoginLink(account.stripeAccountId)
+  const link = await stripe(stripeMode()).accounts.createLoginLink(account.stripeAccountId)
   redirect(link.url)
 }
 
@@ -132,6 +94,7 @@ export async function openStripeDashboard() {
 
 export async function createApiKey(name: string, mode: TbMode = "live", scopes?: Scope[]): Promise<ActionResult<{ secret: string; mode: TbMode }>> {
   const ctx = await requireManager()
+  if (mode !== "live" && mode !== "test") return { ok: false, error: "Choose test or live mode" }
   const label = name.trim().slice(0, 80)
   if (!label) return { ok: false, error: "Give the key a name so you can recognise it later" }
 
@@ -203,11 +166,11 @@ export async function updateProduct(id: string, patch: { name?: string; descript
 
 export async function createPrice(formData: FormData): Promise<ActionResult> {
   const ctx = await requireManager()
-  const amount = Math.round(Number(formData.get("amount")) * 100)
-  if (!Number.isInteger(amount) || amount < 50) return { ok: false, error: "Enter an amount of at least 0.50" }
-
   const currency = String(formData.get("currency") ?? "usd").toLowerCase()
   if (!CURRENCIES.includes(currency as (typeof CURRENCIES)[number])) return { ok: false, error: `Unsupported currency "${currency}"` }
+
+  const amount = parseMoney(String(formData.get("amount") ?? ""), currency)
+  if (amount === null || amount < minimumCharge(currency) || amount > 2147483647) return { ok: false, error: `Enter a valid amount of at least ${formatMoney(minimumCharge(currency), currency)}` }
 
   const productId = String(formData.get("product_id") ?? "") || null
   if (productId) {
@@ -295,7 +258,11 @@ export async function refundPayment(formData: FormData): Promise<ActionResult> {
   const ctx = await requireManager()
   const paymentId = String(formData.get("payment_id") ?? "")
   const raw = String(formData.get("amount") ?? "").trim()
-  const amount = raw ? Math.round(Number(raw) * 100) : undefined
+  if (!isUuid(paymentId)) return { ok: false, error: "Payment not found" }
+  const [payment] = await db.select().from(schema.tollboothPayments).where(and(eq(schema.tollboothPayments.id, paymentId), eq(schema.tollboothPayments.tenantId, ctx.tenant.id)))
+  if (!payment) return { ok: false, error: "Payment not found" }
+  const amount = raw ? parseMoney(raw, payment.currency) : undefined
+  if (amount === null) return { ok: false, error: "Enter a valid amount for this currency" }
 
   try {
     await createRefund({
@@ -321,9 +288,12 @@ export async function refundPayment(formData: FormData): Promise<ActionResult> {
 export async function createEndpoint(formData: FormData): Promise<ActionResult<{ secret: string }>> {
   const ctx = await requireManager()
   const url = String(formData.get("url") ?? "").trim()
-  if (!/^https:\/\//.test(url)) return { ok: false, error: "The URL must start with https://" }
+  if (!safeUrl(url) || !url.startsWith("https://")) return { ok: false, error: "The URL must start with https://" }
 
+  const mode = formData.get("mode") ?? "test"
+  if (mode !== "live" && mode !== "test") return { ok: false, error: "Choose test or live mode" }
   const events = formData.getAll("events").map(String)
+  if (events.some((event) => !WEBHOOK_EVENTS.includes(event as (typeof WEBHOOK_EVENTS)[number]) && event !== "*")) return { ok: false, error: "Choose valid webhook events" }
   const [endpoint] = await db
     .insert(schema.tollboothWebhookEndpoints)
     .values({
@@ -332,7 +302,7 @@ export async function createEndpoint(formData: FormData): Promise<ActionResult<{
       description: String(formData.get("description") ?? "").trim().slice(0, 200) || null,
       secret: generateWebhookSecret(),
       events: events.length ? events : ["*"],
-      mode: "live",
+      mode,
       createdById: ctx.userId,
     })
     .returning()
@@ -377,34 +347,20 @@ export async function rotateEndpointSecret(id: string): Promise<ActionResult<{ s
 
 export async function replayEvent(id: string): Promise<ActionResult> {
   const ctx = await requireManager()
-  await db
-    .update(schema.tollboothWebhookDeliveries)
-    .set({ status: "pending", attempts: 0, error: null, nextAttemptAt: new Date() })
-    .where(and(eq(schema.tollboothWebhookDeliveries.id, id), eq(schema.tollboothWebhookDeliveries.tenantId, ctx.tenant.id)))
-  await deliverPending(5)
+  if (!isUuid(id)) return { ok: false, error: "Delivery not found" }
+  const result = await replayDelivery(id, ctx.tenant.id)
+  if (!result) return { ok: false, error: "Delivery not found or already being sent" }
+  if (!result.ok) return { ok: false, error: result.error ?? "Delivery failed" }
   revalidatePath("/dashboard/webhooks")
   return { ok: true }
 }
 
 export async function sendTestEvent(id: string): Promise<ActionResult> {
   const ctx = await requireManager()
-  const [endpoint] = await db
-    .select()
-    .from(schema.tollboothWebhookEndpoints)
-    .where(and(eq(schema.tollboothWebhookEndpoints.id, id), eq(schema.tollboothWebhookEndpoints.tenantId, ctx.tenant.id)))
-  if (!endpoint) return { ok: false, error: "No such endpoint" }
-
-  const [{ emit }] = await Promise.all([import("@/lib/webhooks")])
-  await emit("payment.succeeded", ctx.tenant.id, endpoint.mode as TbMode, {
-    object: "payment",
-    id: "test_payment_id",
-    status: "succeeded",
-    amount: 2500,
-    currency: "usd",
-    description: "Tollbooth test event",
-    test: true,
-  })
-  await deliverPending(5)
+  if (!isUuid(id)) return { ok: false, error: "Endpoint not found" }
+  const result = await sendEndpointTest(id, ctx.tenant.id)
+  if (!result) return { ok: false, error: "Endpoint not found or paused" }
+  if (!result.ok) return { ok: false, error: result.error ?? "Test delivery failed" }
   revalidatePath("/dashboard/webhooks")
   return { ok: true }
 }

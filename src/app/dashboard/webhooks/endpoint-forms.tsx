@@ -12,6 +12,7 @@ type Endpoint = {
   url: string
   description: string | null
   enabled: number
+  mode: string
   failureCount: number
   lastDeliveryStatus: string | null
   events: string[] | null
@@ -37,9 +38,10 @@ export function EndpointForm({ events }: { events: string[] }) {
       className="card space-y-4 p-5"
       onSubmit={(e) => {
         e.preventDefault()
+        const data = new FormData(e.currentTarget)
         setError(null)
         start(async () => {
-          const result = await createEndpoint(new FormData(e.currentTarget))
+          const result = await createEndpoint(data)
           if (result.ok && result.data) {
             setSecret(result.data.secret)
             router.refresh()
@@ -62,6 +64,10 @@ export function EndpointForm({ events }: { events: string[] }) {
         </div>
       ) : (
         <>
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-muted">Environment</span>
+            <select className="input" name="mode" defaultValue="test"><option value="test">Test — fake money</option><option value="live">Live — real payments</option></select>
+          </label>
           <label className="block">
             <span className="mb-1.5 block text-xs font-medium text-muted">URL</span>
             <input className="input" name="url" type="url" required placeholder="https://yoursite.com/api/tollbooth" />
@@ -118,6 +124,7 @@ export function EndpointRow({ endpoint, canManage }: { endpoint: Endpoint; canMa
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-medium">{endpoint.description ?? endpoint.url}</h3>
             <StatusBadge value={enabled ? (endpoint.failureCount > 0 ? "failing" : "active") : "disabled"} />
+            <StatusBadge value={endpoint.mode} />
           </div>
           <p className="mt-1 break-all font-mono text-xs text-muted">{endpoint.url}</p>
           <p className="mt-1 text-xs text-muted">

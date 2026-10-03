@@ -254,3 +254,8 @@ alter table tollbooth_payments add column if not exists last_error text;
 
 alter table tollbooth_events add column if not exists account text;
 alter table tollbooth_events add column if not exists livemode integer not null default 1;
+
+-- Durable ownership of an unresolved refund; no financial balance is pre-settled.
+alter table tollbooth_payments add column if not exists pending_refund_id uuid;
+alter table tollbooth_idempotency_keys add column if not exists lease_token uuid;
+alter table tollbooth_idempotency_keys add column if not exists mode text;

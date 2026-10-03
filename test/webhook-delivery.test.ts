@@ -7,7 +7,8 @@
  */
 import { test, describe, beforeEach, after } from "node:test"
 import assert from "node:assert/strict"
-import { createServer, type Server } from "node:http"
+import * as webhooks from "@/lib/webhooks"
+import { createServer, type Server, type ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
 import { emit, deliver, deliverPending, replayDelivery, verifySignature, MAX_ATTEMPTS } from "@/lib/webhooks"
 import { resetTestData, sql, suiteFor } from "./helpers/db"
@@ -20,18 +21,25 @@ const skip = process.env.DATABASE_URL ? false : "DATABASE_URL not set"
 let server: Server
 let received: { body: string; headers: Record<string, unknown> }[] = []
 let respondWith: () => number = () => 200
+let holdNext = false
+let heldResponse: ServerResponse | undefined
+let onHeld: (() => void) | undefined
 
 describe("webhook delivery", { skip }, () => {
   beforeEach(async () => {
     await resetTestData(SUITE)
     received = []
     respondWith = () => 200
+    holdNext = false
+    heldResponse = undefined
+    onHeld = undefined
     if (!server) {
       server = createServer((req, res) => {
         let body = ""
         req.on("data", (chunk) => (body += chunk))
         req.on("end", () => {
           received.push({ body, headers: req.headers as Record<string, unknown> })
+          if (holdNext) { holdNext = false; heldResponse = res; onHeld?.(); return }
           res.writeHead(respondWith()).end("ok")
         })
       })
@@ -145,7 +153,8 @@ describe("webhook delivery", { skip }, () => {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       // Force the retry to be due rather than waiting out the backoff.
       await sql().query(`update tollbooth_webhook_deliveries set next_attempt_at = now() where id = $1`, [delivery.id])
-      await deliver(delivery.id)
+      const result = await deliver(delivery.id)
+      assert.equal(result?.attempt, attempt, `attempt ${attempt} must be claimed and completed`)
     }
 
     const [row] = await sql().query(`select status, attempts from tollbooth_webhook_deliveries where id = $1`, [delivery.id])
@@ -191,6 +200,35 @@ describe("webhook delivery", { skip }, () => {
     await deliverPending()
     const [delivery] = await sql().query(`select id from tollbooth_webhook_deliveries where tenant_id = $1`, [TENANT])
     assert.equal(await replayDelivery(delivery.id, "11111111-1111-4111-8111-111111111111"), null)
+    assert.equal(await replayDelivery(delivery.id, TENANT, "11111111-1111-4111-8111-111111111111"), null)
+  })
+
+  test("an abandoned worker lease can be recovered", async () => {
+    await makeEndpoint()
+    await emit("payment.succeeded", TENANT, "test", {})
+    await sql().query("update tollbooth_webhook_deliveries set status = 'processing', next_attempt_at = now() - interval '1 minute' where tenant_id = $1", [TENANT])
+    await deliverPending()
+    assert.equal(received.length, 1)
+  })
+
+  test("active leases cannot be replayed and stale workers cannot finalize reclaimed attempts", async (t) => {
+    const endpoint = await makeEndpoint()
+    await emit("payment.succeeded", TENANT, "test", {})
+    const [delivery] = await sql().query("select id from tollbooth_webhook_deliveries where tenant_id = $1", [TENANT])
+    const held = new Promise<void>((resolve) => { onHeld = resolve })
+    holdNext = true
+    const stale = deliver(delivery.id)
+    t.after(() => heldResponse?.end())
+    await held
+    assert.equal(await replayDelivery(delivery.id, TENANT), null)
+    assert.equal(received.length, 1)
+    await sql().query("update tollbooth_webhook_deliveries set next_attempt_at = now() - interval '1 minute' where id = $1", [delivery.id])
+    assert.equal((await deliver(delivery.id))?.ok, true)
+    heldResponse!.writeHead(500).end("stale failure")
+    assert.equal(await stale, null)
+    const [row] = await sql().query("select last_delivery_status, failure_count from tollbooth_webhook_endpoints where id = $1", [endpoint])
+    assert.equal(row.last_delivery_status, "delivered")
+    assert.equal(row.failure_count, 0)
   })
 
   test("a delivery is sent once, even if the queue is drained twice", async () => {
@@ -199,6 +237,43 @@ describe("webhook delivery", { skip }, () => {
     await deliverPending()
     await deliverPending()
     assert.equal(received.length, 1, "a delivered event is not re-sent on the next drain")
+  })
+
+  test("concurrent workers cannot send the same delivery attempt twice", async () => {
+    await makeEndpoint()
+    await emit("payment.succeeded", TENANT, "test", {})
+    const [row] = await sql().query("select id from tollbooth_webhook_deliveries where tenant_id = $1", [TENANT])
+    await Promise.all([deliver(row.id), deliver(row.id), deliver(row.id)])
+    assert.equal(received.length, 1)
+    await deliver(row.id)
+    assert.equal(received.length, 1, "direct delivery must also protect an already-delivered event")
+  })
+
+  test("a disabled endpoint does not receive previously queued events", async () => {
+    const endpoint = await makeEndpoint()
+    await emit("payment.succeeded", TENANT, "test", {})
+    await sql().query("update tollbooth_webhook_endpoints set enabled = 0 where id = $1", [endpoint])
+    await deliverPending()
+    assert.equal(received.length, 0)
+  })
+
+  test("the test button sends a synthetic event to only the selected endpoint", async () => {
+    const first = await makeEndpoint()
+    await makeEndpoint()
+    const sendTest = (webhooks as unknown as { sendEndpointTest: (id: string, tenant: string) => Promise<unknown> }).sendEndpointTest
+    await sendTest(first, TENANT)
+    assert.equal(received.length, 1)
+    const event = JSON.parse(received[0].body)
+    assert.equal(event.test, true)
+    assert.equal(event.data.object.test, true)
+    assert.equal(await sendTest(first, "11111111-1111-4111-8111-111111111111"), null)
+  })
+
+  test("a zero worker time budget leaves deliveries queued", async () => {
+    await makeEndpoint()
+    await emit("payment.succeeded", TENANT, "test", {})
+    await (deliverPending as unknown as (limit: number, budget: number) => Promise<unknown>)(25, 0)
+    assert.equal(received.length, 0)
   })
 
   test("an unreachable endpoint fails without throwing", async () => {

@@ -92,6 +92,7 @@ function record(op: string, args: unknown[]) {
 }
 
 export default class FakeStripe {
+  static errors=errors;
   readonly key: string
   readonly options: any
   constructor(key: string, options: any = {}) {
@@ -130,14 +131,15 @@ export default class FakeStripe {
 
   checkout = {
     sessions: {
-      async create(params: any) {
-        const result = record("checkout.sessions.create", [params]) ?? {}
+      async create(params: any, options?: any) {
+        const result = record("checkout.sessions.create", [params, options]) ?? {}
         const id = result.id ?? `cs_test_${unique()}`
         const session = {
           id,
           url: `https://checkout.stripe.test/${id}`,
           expires_at: Math.floor(Date.now() / 1000) + 3600,
           payment_status: "unpaid",
+          metadata:params.metadata, currency:params.line_items[0].price_data.currency,
           ...result,
         }
         state().sessions.push(session)
@@ -146,10 +148,13 @@ export default class FakeStripe {
     },
   }
 
+  charges={async retrieve(id:string){const custom=record('charges.retrieve',[id]);if(custom)return custom;const refunds=state().refunds.filter(refund=>refund.charge===id&&refund.status==='succeeded');return{id,payment_intent:id.replace(/^ch_/,''),currency:refunds[0]?.currency??'usd',livemode:false,amount_refunded:refunds.reduce((total,refund)=>total+refund.amount,0)};}};
   refunds = {
-    async create(params: any) {
-      const result = record("refunds.create", [params]) ?? {}
-      const refund = { id: result.id ?? `re_${unique()}`, status: "succeeded", ...result }
+    async retrieve(id:string){return record('refunds.retrieve',[id])??state().refunds.find(refund=>refund.id===id);},
+    async list(params:any){return record('refunds.list',[params])??{data:state().refunds.filter(refund=>refund.payment_intent===params.payment_intent)};},
+    async create(params: any, options?: any) {
+      const result = record("refunds.create", [params, options]) ?? {}
+      const refund = { id: result.id ?? `re_${unique()}`, status: "succeeded", amount:params.amount,currency:state().sessions.find(session=>session.metadata?.tollbooth_payment_id===params.metadata?.tollbooth_payment_id)?.currency??"usd",payment_intent:params.payment_intent,charge:`ch_${params.payment_intent}`,metadata:params.metadata,...result }
       state().refunds.push(refund)
       return refund
     },

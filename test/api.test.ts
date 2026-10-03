@@ -176,6 +176,20 @@ describe("api", { skip }, () => {
   })
 
   describe("checkout", () => {
+    test("omitted return URLs use public hosted outcome pages", async () => {
+      const res = await call(checkout, { method: "POST", key, body: { amount: 1000, description: "Ticket" } })
+      assert.equal(res.status, 201)
+      const params = __stripe.calls("checkout.sessions.create")[0].args[0] as any
+      assert.match(new URL(params.success_url).pathname, /^\/pay\/complete\//)
+      assert.match(new URL(params.cancel_url).pathname, /^\/pay\/cancelled\//)
+    })
+
+    test("invalid explicit return URLs are rejected", async () => {
+      const res = await call(checkout, { method: "POST", key, body: { amount: 1000, description: "Ticket", success_url: "javascript:alert(1)" } })
+      assert.equal(res.status, 400)
+      assert.equal(__stripe.calls("checkout.sessions.create").length, 0)
+    })
+
     test("a workspace without payouts is told to finish onboarding", async () => {
       await sql().query(`delete from tollbooth_accounts where tenant_id = $1`, [TENANT])
       const res = await call(checkout, { method: "POST", key, body: { amount: 2500, description: "T" } })

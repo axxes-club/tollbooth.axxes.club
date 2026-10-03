@@ -3,7 +3,7 @@ import { requireContext } from "@/lib/context"
 import { PageHeader, Stat, Empty, Notice, Sparkline, StatusBadge } from "@/components/ui"
 import { PaymentsTable } from "@/components/payments-table"
 import { formatMoney, feeDescription } from "@/lib/fees"
-import { stripeConfigured } from "@/lib/stripe"
+import { stripeConfigured, stripeMode } from "@/lib/stripe"
 import { getAccount, getPayments, getVolume, getDailyVolume, getOnboarding } from "./queries"
 
 const dateFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" })
@@ -17,23 +17,24 @@ const dateFmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric
  */
 export default async function Overview() {
   const ctx = await requireContext()
-  const [account, volume, daily, recent, onboarding] = await Promise.all([
+  const mode = stripeMode()
+  const [account, volume, recent, onboarding] = await Promise.all([
     getAccount(ctx.tenant.id),
-    getVolume(ctx.tenant.id, 30),
-    getDailyVolume(ctx.tenant.id, 30),
-    getPayments(ctx.tenant.id, 8),
+    getVolume(ctx.tenant.id, 30, mode),
+    getPayments(ctx.tenant.id, 8, undefined, mode),
     getOnboarding(ctx.tenant.id),
   ])
 
   const primary = [...volume].sort((a, b) => b.gross - a.gross)[0]
   const currency = primary?.currency ?? account?.defaultCurrency ?? "usd"
+  const daily = await getDailyVolume(ctx.tenant.id, 30, mode, currency)
   const setupComplete = onboarding.done === onboarding.total
 
   return (
     <>
       <PageHeader
         title={`Good to see you, ${ctx.user.name?.split(" ")[0] ?? "there"}`}
-        description={`Payments for ${ctx.tenant.name}.`}
+        description={`${mode === "test" ? "Test payments" : "Live payments"} for ${ctx.tenant.name}.`}
         action={
           <Link href="/dashboard/links" className="btn-primary">
             New payment link
@@ -45,7 +46,7 @@ export default async function Overview() {
         <div className="mb-6">
           <Notice tone="warn" title="Payments aren't fully configured">
             Set <code className="font-mono text-xs">STRIPE_SECRET_KEY</code> and{" "}
-            <code className="font-mono text-xs">STRIPE_SECRET_KEY_TEST</code> in the environment. Until then no charge can be started.
+            <code className="font-mono text-xs">STRIPE_SECRET_KEY_TEST</code> to enable both live and sandbox payments. Contact your platform administrator if an environment is unavailable.
           </Notice>
         </div>
       )}
@@ -80,6 +81,7 @@ export default async function Overview() {
               </li>
             ))}
           </ol>
+          <p className="mt-4 text-xs text-muted">Building an integration? <Link href="/dashboard/developers" className="text-accent underline">Create a test key</Link> and <Link href="/dashboard/webhooks" className="text-accent underline">configure webhooks</Link>. These are optional for payment links.</p>
         </section>
       )}
 
@@ -115,7 +117,7 @@ export default async function Overview() {
           <div className="flex items-baseline justify-between">
             <h2 className="text-sm font-medium text-muted">Volume, last 30 days</h2>
             <p className="font-mono text-[11px] uppercase tracking-[0.15em] text-muted">
-              peak {formatMoney(Math.max(...daily.map((d) => d.gross)), currency)}
+              peak {formatMoney(Math.max(...daily.map((d) => d.gross)), currency, mode)}
             </p>
           </div>
           <div className="mt-4">
@@ -152,7 +154,7 @@ export default async function Overview() {
 
       {!stripeConfigured() && (
         <p className="mt-6 text-xs text-muted">
-          Current platform mode: <StatusBadge value="test" /> — set <code className="font-mono">STRIPE_SECRET_KEY</code> to accept real money.
+          Current platform mode: <StatusBadge value={mode} />.
         </p>
       )}
     </>

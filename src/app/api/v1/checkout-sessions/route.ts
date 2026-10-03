@@ -12,7 +12,7 @@ import { serializePayment } from "@/lib/api"
  * checkout URL. The caller redirects the buyer there and gets a `payment.succeeded`
  * webhook. Send an `Idempotency-Key` so a retry can't charge twice.
  */
-export const POST = withApi(async ({ req, caller, json }) => {
+export const POST = withApi(async ({ req, caller, json, idempotency }) => {
   const body = await json<{
     amount?: number
     price?: string
@@ -27,9 +27,14 @@ export const POST = withApi(async ({ req, caller, json }) => {
     cancel_url?: string
   }>()
 
-  const site = new URL(process.env.TOLLBOOTH_SITE_URL ?? "https://tollbooth.axxes.club")
-  const successUrl = safeUrl(body.success_url) ?? new URL("/dashboard/payments", site).toString()
-  const cancelUrl = safeUrl(body.cancel_url) ?? new URL("/dashboard/payments", site).toString()
+  const returnUrl = (value: unknown, field: string) => {
+    if (value === undefined || value === null || (typeof value === "string" && !value.trim())) return ""
+    const url = safeUrl(value)
+    if (!url) throw fail(400, "invalid_request_error", `${field} must be an https URL`)
+    return url
+  }
+  const successUrl = returnUrl(body.success_url, "success_url")
+  const cancelUrl = returnUrl(body.cancel_url, "cancel_url")
 
   const metadata: Record<string, string> = {}
   if (body.metadata && typeof body.metadata === "object") {
@@ -115,6 +120,7 @@ export const POST = withApi(async ({ req, caller, json }) => {
   try {
     const payment = await createCheckout({
       tenantId: caller.tenantId,
+      operation:idempotency,
       mode: caller.mode,
       apiKeyId: caller.apiKeyId,
       amount: amount!,

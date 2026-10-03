@@ -1,5 +1,9 @@
 import "server-only"
-import { and, eq, sql } from "drizzle-orm"
+import type Stripe from "stripe"
+import {randomUUID} from "node:crypto"
+import type {IdempotencyGuard} from "./idempotency"
+import {IdempotencyError} from "./idempotency"
+import { and, eq, inArray, sql } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { applicationFee } from "@/lib/fees"
 import { stripe } from "@/lib/stripe"
@@ -62,6 +66,7 @@ export async function requireReadyAccount(tenantId: string): Promise<TbAccount> 
 }
 
 type CreateCheckout = {
+  operation?:IdempotencyGuard|null
   tenantId: string
   mode: TbMode
   apiKeyId?: string | null
@@ -89,100 +94,38 @@ type CreateCheckout = {
  * If Stripe rejects, the row is marked failed rather than deleted, which keeps the
  * merchant's view honest about attempts that were made.
  */
-export async function createCheckout(input: CreateCheckout): Promise<TbPayment> {
-  const account = await requireReadyAccount(input.tenantId)
-  const amount = input.amount * (input.quantity ?? 1)
-  const fee = applicationFee(amount)
-  const now = new Date()
-  const expiresAt = new Date(now.getTime() + CHECKOUT_TTL_SECONDS * 1000)
-
-  const [payment] = await db
-    .insert(schema.tollboothPayments)
-    .values({
-      tenantId: input.tenantId,
-      apiKeyId: input.apiKeyId ?? null,
-      amount,
-      currency: input.currency,
-      applicationFee: fee,
-      netFee: fee,
-      description: input.description,
-      customerEmail: input.customerEmail ?? null,
-      customerId: input.customerId ?? null,
-      priceId: input.priceId ?? null,
-      linkId: input.linkId ?? null,
-      reference: input.reference ?? null,
-      metadata: input.metadata ?? {},
-      source: input.source ?? "api",
-      mode: input.mode,
-      successUrl: input.successUrl,
-      expiresAt,
-      status: "pending",
-    })
-    .returning()
-
-  const client = stripe(input.mode)
-  // Tollbooth's own return page is the safe default: it can show the outcome even if
-  // the merchant forgets to build a thank-you screen.
-  const site = new URL(process.env.TOLLBOOTH_SITE_URL ?? "https://tollbooth.axxes.club")
-  const success = input.successUrl
-    ? appendQuery(input.successUrl, { tollbooth_payment_id: payment.id })
-    : new URL(`/pay/complete/${payment.id}`, site).toString()
-  const cancel = input.cancelUrl ?? new URL(`/pay/cancelled/${payment.id}`, site).toString()
-
-  try {
-    const session = await client.checkout.sessions.create(
-      {
-        mode: "payment",
-        line_items: [
-          {
-            quantity: input.quantity ?? 1,
-            price_data: {
-              currency: input.currency,
-              unit_amount: input.amount,
-              product_data: { name: input.description, ...(input.metadata?.image_url ? { images: [input.metadata.image_url] } : {}) },
-            },
-          },
-        ],
-        customer_email: input.customerEmail ?? undefined,
-        success_url: success,
-        cancel_url: cancel,
-        client_reference_id: payment.id,
-        // Wallets and saved cards show up automatically on a hosted Checkout page;
-        // naming them here is what makes the button order predictable.
-        payment_method_types: undefined,
-        expires_at: Math.floor(expiresAt.getTime() / 1000),
-        metadata: { tollbooth_payment_id: payment.id, tenant_id: input.tenantId },
-        payment_intent_data: {
-          application_fee_amount: fee || undefined,
-          transfer_data: { destination: account.stripeAccountId },
-          metadata: { ...input.metadata, tollbooth_payment_id: payment.id },
-        },
-      },
-      { idempotencyKey: input.idempotencyKey ?? undefined }
-    )
-
-    const [updated] = await db
-      .update(schema.tollboothPayments)
-      .set({
-        checkoutSessionId: session.id,
-        checkoutUrl: session.url,
-        // Stripe gives an explicit expiry; trust it over our own arithmetic.
-        expiresAt: session.expires_at ? new Date(session.expires_at * 1000) : expiresAt,
-        updatedAt: new Date(),
-      })
-      .where(eq(schema.tollboothPayments.id, payment.id))
-      .returning()
-
-    const settled = updated ?? payment
-    await emitPayment(settled, "payment.created").catch((e) => console.error("[tollbooth] payment.created emit failed", e))
-    return settled
-  } catch (err) {
-    await db
-      .update(schema.tollboothPayments)
-      .set({ status: "failed", lastError: err instanceof Error ? err.message.slice(0, 500) : "Stripe error", updatedAt: new Date() })
-      .where(eq(schema.tollboothPayments.id, payment.id))
-    throw err
-  }
+export async function createCheckout(input:CreateCheckout):Promise<TbPayment>{
+ const operation=input.operation;
+ if(operation?.checkpoint&&(operation.checkpoint.kind!=='checkout'||operation.checkpoint.mode!==input.mode))throw new IdempotencyError('Checkout operation mode or identity mismatch');
+ const existing=operation?.checkpoint?.paymentId?(await db.select().from(schema.tollboothPayments).where(and(eq(schema.tollboothPayments.id,String(operation.checkpoint.paymentId)),eq(schema.tollboothPayments.tenantId,input.tenantId))))[0]:undefined;
+ if(existing&&(existing.checkoutSessionId||existing.status!=='pending'))return existing;
+ if(operation?.checkpoint?.preparedAt&&Date.now()-new Date(String(operation.checkpoint.preparedAt)).getTime()>23*3600000)throw new IdempotencyError('Unresolved checkout requires provider reconciliation before retry');
+ const successUrl=input.successUrl.trim(),cancelUrl=input.cancelUrl.trim();if((successUrl&&!safeUrl(successUrl))||(cancelUrl&&!safeUrl(cancelUrl)))throw Error('Checkout return URLs must use HTTPS');
+ const account=await requireReadyAccount(input.tenantId),client=stripe(input.mode);
+ const plannedId=operation?.checkpoint?.paymentId?String(operation.checkpoint.paymentId):randomUUID();
+ const expiresAt=operation?.checkpoint?.expiresAt?new Date(String(operation.checkpoint.expiresAt)):new Date(Date.now()+CHECKOUT_TTL_SECONDS*1000);
+ const amount=input.amount*(input.quantity??1),fee=operation?.checkpoint?.paymentValues?Number((operation.checkpoint.paymentValues as {applicationFee:number}).applicationFee):applicationFee(amount);
+ const site=new URL(process.env.TOLLBOOTH_SITE_URL||'https://tollbooth.axxes.club');
+ const originalValues={id:plannedId,tenantId:input.tenantId,apiKeyId:input.apiKeyId??null,amount,currency:input.currency,applicationFee:fee,netFee:fee,description:input.description,customerEmail:input.customerEmail??null,customerId:input.customerId??null,priceId:input.priceId??null,linkId:input.linkId??null,reference:input.reference??null,metadata:input.metadata??{},source:input.source??'api',mode:input.mode,successUrl,expiresAt,status:'pending'};
+ const savedValues=operation?.checkpoint?.paymentValues as typeof originalValues|undefined;
+ const values=savedValues?{...savedValues,expiresAt:new Date(String(savedValues.expiresAt))}:originalValues;
+ const originalParams:Stripe.Checkout.SessionCreateParams={mode:'payment',line_items:[{quantity:input.quantity??1,price_data:{currency:input.currency,unit_amount:input.amount,product_data:{name:input.description,...(input.metadata?.image_url?{images:[input.metadata.image_url]}:{})}}}],customer_email:input.customerEmail??undefined,success_url:successUrl?appendQuery(successUrl,{tollbooth_payment_id:plannedId}):new URL(`/pay/complete/${plannedId}`,site).toString(),cancel_url:cancelUrl||new URL(`/pay/cancelled/${plannedId}`,site).toString(),client_reference_id:plannedId,expires_at:Math.floor(expiresAt.getTime()/1000),metadata:{tollbooth_payment_id:plannedId,tenant_id:input.tenantId},payment_intent_data:{application_fee_amount:fee||undefined,transfer_data:{destination:account.stripeAccountId},metadata:{...input.metadata,tollbooth_payment_id:plannedId}}};
+ const params=JSON.parse(JSON.stringify(operation?.checkpoint?.stripeParams??originalParams))as Stripe.Checkout.SessionCreateParams;
+ const providerKey=String(operation?.checkpoint?.providerKey??`tollbooth-checkout:${plannedId}`);
+ if(values.tenantId!==input.tenantId||values.mode!==input.mode||params.metadata?.tenant_id!==input.tenantId||params.client_reference_id!==plannedId)throw new IdempotencyError('Persisted checkout identity mismatch');
+ if(operation&&!operation.checkpoint)await operation.saveCheckpoint({kind:'checkout',mode:input.mode,paymentId:plannedId,expiresAt:expiresAt.toISOString(),paymentValues:values,stripeParams:params,providerKey});
+ await operation?.assertOwnership();
+ const payment=existing??(await db.insert(schema.tollboothPayments).values(values).returning())[0];
+ try{
+  await operation?.assertOwnership();
+  const session=await client.checkout.sessions.create(params,{idempotencyKey:providerKey});
+  await operation?.assertOwnership();
+  const [updated]=await db.update(schema.tollboothPayments).set({checkoutSessionId:session.id,checkoutUrl:session.url,expiresAt:session.expires_at?new Date(session.expires_at*1000):expiresAt,updatedAt:new Date()}).where(eq(schema.tollboothPayments.id,payment.id)).returning();const settled=updated??payment;await emitPayment(settled,'payment.created').catch(()=>{});return settled;
+ }catch(error){
+  await operation?.assertOwnership();
+  const definitive=typeof error==='object'&&error!==null&&'type'in error&&['StripeCardError','StripeInvalidRequestError','card_error','invalid_request_error'].includes(String(error.type));
+  await db.update(schema.tollboothPayments).set({status:definitive?'failed':'pending',lastError:error instanceof Error?error.message.slice(0,500):'Provider outcome unknown',updatedAt:new Date()}).where(and(eq(schema.tollboothPayments.id,payment.id),eq(schema.tollboothPayments.status,'pending')));throw error;
+ }
 }
 
 function appendQuery(url: string, params: Record<string, string>) {
@@ -222,7 +165,7 @@ export async function fetchBalance(stripeAccountId: string, mode: TbMode) {
  */
 export async function markSucceeded(paymentId: string, patch: { paymentIntentId?: string; customerEmail?: string | null }) {
   const [payment] = await db.select().from(schema.tollboothPayments).where(eq(schema.tollboothPayments.id, paymentId))
-  if (!payment || payment.status === "succeeded") return payment ?? null
+  if (!payment || !["pending", "failed", "expired"].includes(payment.status)) return payment ?? null
 
   const now = new Date()
   const [updated] = await db
@@ -234,10 +177,14 @@ export async function markSucceeded(paymentId: string, patch: { paymentIntentId?
       lastError: null,
       updatedAt: now,
     })
-    .where(and(eq(schema.tollboothPayments.id, paymentId), sql`${schema.tollboothPayments.status} <> 'succeeded'`))
+    .where(and(eq(schema.tollboothPayments.id, paymentId), inArray(schema.tollboothPayments.status, ["pending", "failed", "expired"])))
     .returning()
 
-  const settled = updated ?? payment
+  if (!updated) {
+    const [current] = await db.select().from(schema.tollboothPayments).where(eq(schema.tollboothPayments.id, paymentId))
+    return current ?? payment
+  }
+  const settled = updated
 
   // Roll up to the customer. The WHERE guard keeps concurrent webhooks from
   // double-counting the same payment into total_spent.
@@ -282,4 +229,3 @@ export async function markTerminal(paymentId: string, status: "failed" | "expire
   await emitPayment(updated, type, { status: payment.status }).catch((e) => console.error(`[tollbooth] ${type} emit failed`, e))
   return updated
 }
-

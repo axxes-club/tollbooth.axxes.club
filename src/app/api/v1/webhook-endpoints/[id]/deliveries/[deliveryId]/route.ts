@@ -28,7 +28,7 @@ export const GET = withApi<Params>(async ({ params, caller }) => {
  * fixed the receiver. The event is delivered again as-is, with a fresh signature.
  */
 export const POST = withApi<Params>(async ({ params, caller }) => {
-  const result = await replayDelivery(params.deliveryId, caller.tenantId)
+  const result = await replayDelivery(params.deliveryId, caller.tenantId, params.id)
   if (!result) throw fail(404, "resource_missing", "No such delivery for this endpoint")
   return jsonResponse({
     object: "event_delivery_replay",
