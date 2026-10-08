@@ -1,30 +1,13 @@
 import { describe, test, beforeEach, after, mock } from "node:test"
 import assert from "node:assert/strict"
 import * as actions from "@/app/dashboard/actions"
+import { onboardingLink, payoutDetailsLink } from "@/lib/accounts"
 import { resetTestData, seedReadyAccount, sql, suiteFor } from "./helpers/db"
 import { __stripe } from "./fakes/stripe"
 
 const SUITE = suiteFor("actions")
 const context = require("@/lib/context")
 const cache = require("next/cache")
-const headers = require("next/headers")
-const navigation = require("next/navigation")
-
-/** Runs an action that ends in `redirect()` and returns where it was sent. */
-async function redirectedTo(run: () => Promise<unknown>): Promise<string> {
-  mock.method(headers, "headers", async () => new Headers({ host: "tollbooth.test", "x-forwarded-proto": "https" }))
-  mock.method(navigation, "redirect", (url: string) => {
-    throw Object.assign(new Error("redirect"), { url })
-  })
-  try {
-    await run()
-  } catch (err) {
-    if ((err as { url?: string }).url) return (err as { url: string }).url
-    throw err
-  }
-  throw new Error("expected a redirect")
-}
-
 const PAYOUT_CONTROLLER = {
   stripe_dashboard: { type: "none" },
   fees: { payer: "account" },
@@ -65,7 +48,7 @@ describe("dashboard actions", { skip: !process.env.DATABASE_URL }, () => {
   })
 
   test("payout accounts make Stripe the fee payer and risk holder, with no Stripe dashboard", async () => {
-    const url = await redirectedTo(() => actions.startOnboarding(new FormData()))
+    const url = await onboardingLink({ tenantId: SUITE.tenant, name: "Test", email: "test@example.com" }, "test", "https://tollbooth.test")
     assert.equal(url, "https://connect.stripe.test/setup")
 
     const [create] = __stripe.calls("accounts.create")
@@ -79,7 +62,7 @@ describe("dashboard actions", { skip: !process.env.DATABASE_URL }, () => {
   test("an account from another Stripe platform is replaced, not reused", async () => {
     await seedReadyAccount(SUITE.tenant, "acct_previous_platform")
     await sql().query(`update tollbooth_accounts set charges_enabled = 0 where tenant_id = $1`, [SUITE.tenant])
-    await redirectedTo(() => actions.startOnboarding(new FormData()))
+    await onboardingLink({ tenantId: SUITE.tenant, name: "Test", email: "test@example.com" }, "test", "https://tollbooth.test")
 
     assert.equal(__stripe.calls("accounts.create").length, 1)
     const [row] = await sql().query(`select stripe_account_id, details_submitted from tollbooth_accounts where tenant_id = $1`, [SUITE.tenant])
@@ -90,7 +73,7 @@ describe("dashboard actions", { skip: !process.env.DATABASE_URL }, () => {
   test("a correctly configured account is reused", async () => {
     const id = await seedReadyAccount(SUITE.tenant, "acct_configured")
     __stripe.account(id, { controller: PAYOUT_CONTROLLER })
-    await redirectedTo(() => actions.startOnboarding(new FormData()))
+    await onboardingLink({ tenantId: SUITE.tenant, name: "Test", email: "test@example.com" }, "test", "https://tollbooth.test")
 
     assert.equal(__stripe.calls("accounts.create").length, 0)
     assert.equal((__stripe.calls("accountLinks.create")[0].args[0] as any).account, id)
@@ -99,7 +82,7 @@ describe("dashboard actions", { skip: !process.env.DATABASE_URL }, () => {
   test("payout details are edited through Stripe's form, not a Stripe dashboard login", async () => {
     const id = await seedReadyAccount(SUITE.tenant, "acct_details")
     __stripe.account(id, { controller: PAYOUT_CONTROLLER })
-    await redirectedTo(() => actions.updatePayoutDetails())
+    await payoutDetailsLink(SUITE.tenant, "test", "https://tollbooth.test")
 
     assert.equal(__stripe.calls("accounts.createLoginLink").length, 0)
     const params = __stripe.calls("accountLinks.create")[0].args[0] as any
@@ -117,6 +100,7 @@ describe("dashboard actions", { skip: !process.env.DATABASE_URL }, () => {
   })
 
   test("JPY refunds are parsed in the owned payment currency", async () => {
+    __stripe.account(await seedReadyAccount(SUITE.tenant))
     const [payment] = await sql().query("insert into tollbooth_payments (tenant_id, amount, currency, status, payment_intent_id,mode) values ($1, 1000, 'jpy', 'succeeded', 'pi_jpy','test') returning id", [SUITE.tenant])
     const form = new FormData()
     __stripe.on("refunds.create",()=>({currency:"jpy"}));
