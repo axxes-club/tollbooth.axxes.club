@@ -12,7 +12,7 @@ import { createRefund, RefundError } from "@/lib/refunds"
 import { safeUrl } from "@/lib/payments"
 import { uniqueLinkSlug } from "@/lib/slugs"
 import { replayDelivery, sendEndpointTest, WEBHOOK_EVENTS } from "@/lib/webhooks"
-import { syncAccount } from "@/lib/accounts"
+import { onboardingLink, payoutDetailsLink, syncAccount } from "@/lib/accounts"
 import { CURRENCIES, parseMoney, minimumCharge, formatMoney, isUuid } from "@/lib/fees"
 import type { TbMode } from "@/lib/db/schema/tollbooth"
 
@@ -51,43 +51,18 @@ export async function refreshAccountAction() {
   await refreshAccount()
 }
 
-/** Creates the Express account on first use, then sends the owner through Stripe. */
+/** Creates the payout account on first use, then sends the owner through Stripe's verification form. */
 export async function startOnboarding(formData?: FormData) {
   const ctx = await requireManager()
   const mode = formData?.get("mode") ?? stripeMode()
   if (mode !== "live" && mode !== "test") throw new Error("Choose test or live mode")
-  let [account] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, ctx.tenant.id))
-
-  if (!account) {
-    const created = await stripe(mode).accounts.create({
-      type: "express",
-      email: ctx.user.email,
-      business_profile: { name: ctx.tenant.name },
-      capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-      metadata: { tenant_id: ctx.tenant.id, source: "tollbooth" },
-    })
-    ;[account] = await db
-      .insert(schema.tollboothAccounts)
-      .values({ tenantId: ctx.tenant.id, stripeAccountId: created.id })
-      .returning()
-  }
-
-  const base = await origin()
-  const link = await stripe(mode).accountLinks.create({
-    account: account!.stripeAccountId,
-    type: "account_onboarding",
-    refresh_url: `${base}/dashboard/settings?onboarding=retry&mode=${mode}`,
-    return_url: `${base}/dashboard/settings?onboarding=done&mode=${mode}`,
-  })
-  redirect(link.url)
+  redirect(await onboardingLink({ tenantId: ctx.tenant.id, name: ctx.tenant.name, email: ctx.user.email }, mode, await origin()))
 }
 
-export async function openStripeDashboard() {
+/** Sends the owner to change their bank or business details. */
+export async function updatePayoutDetails() {
   const ctx = await requireManager()
-  const [account] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, ctx.tenant.id))
-  if (!account?.detailsSubmitted) throw new Error("Finish payout setup first")
-  const link = await stripe(stripeMode()).accounts.createLoginLink(account.stripeAccountId)
-  redirect(link.url)
+  redirect(await payoutDetailsLink(ctx.tenant.id, stripeMode(), await origin()))
 }
 
 // ----------------------------------------------------------------- API keys

@@ -36,19 +36,27 @@ type Args = {
 /**
  * Refunds a payment, in full or in part.
  *
- * Two things happen that are easy to get wrong by hand: the transfer back to the
- * connected account is reversed (`reverse_transfer`), and the application fee
- * covering the refunded amount is returned (`refund_application_fee`). Skip either
- * and the merchant pays for a refund out of their own pocket.
+ * The charge is a direct charge on the workspace's own Stripe account, so the refund
+ * is issued there too. The application fee covering the refunded amount is returned
+ * (`refund_application_fee`); skip it and the merchant pays Tollbooth's fee on money
+ * they gave back.
  */
+/** The workspace's Stripe account, where its charges and refunds live. */
+async function accountOf(tenantId:string):Promise<string>{
+  const [account]=await db.select({stripeAccountId:schema.tollboothAccounts.stripeAccountId}).from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId,tenantId));
+  if(!account)throw new RefundError(409,'payout_account_missing','This workspace has no payout account to refund from');
+  return account.stripeAccountId;
+}
+
 export async function createRefund(args: Args): Promise<TbRefund> {
   const operation=args.operation;
   const [payment]=await db.select().from(schema.tollboothPayments).where(and(eq(schema.tollboothPayments.id,args.paymentId),eq(schema.tollboothPayments.tenantId,args.tenantId)));
   if(!payment||(args.mode&&payment.mode!==args.mode))throw new RefundError(404,'resource_missing','No such payment');
+  const stripeAccount=await accountOf(payment.tenantId);
   if(operation?.checkpoint && (operation.checkpoint.kind!=='refund'||operation.checkpoint.mode!==payment.mode||operation.checkpoint.paymentId!==payment.id))throw new RefundError(409,'refund_conflict','Refund operation identity mismatch');
   const refundId=operation?.checkpoint?.refundId?String(operation.checkpoint.refundId):randomUUID();
   const [existing]=await db.select().from(schema.tollboothRefunds).where(and(eq(schema.tollboothRefunds.id,refundId),eq(schema.tollboothRefunds.tenantId,args.tenantId)));
-  if(existing?.stripeRefundId)return (await reconcileProviderRefund(await stripe(payment.mode as 'test'|'live').refunds.retrieve(existing.stripeRefundId)))??existing;
+  if(existing?.stripeRefundId)return (await reconcileProviderRefund(await stripe(payment.mode as 'test'|'live').refunds.retrieve(existing.stripeRefundId,{},{stripeAccount})))??existing;
   if(existing&&['failed','canceled'].includes(existing.status))return existing;
   const amount=operation?.checkpoint?Number(operation.checkpoint.amount):args.amount===undefined?payment.amount-payment.amountRefunded:Number(args.amount);
   const base=operation?.checkpoint?Number(operation.checkpoint.baseRefunded):payment.amountRefunded;
@@ -65,26 +73,40 @@ export async function createRefund(args: Args): Promise<TbRefund> {
   let remote:Stripe.Refund;
   try{
     await operation?.assertOwnership();
-    if(Date.now()-preparedAt.getTime()>23*3600000){const matches=(await stripe(payment.mode as 'test'|'live').refunds.list({payment_intent:payment.paymentIntentId,limit:100})).data.filter(item=>item.metadata?.tollbooth_refund_id===refundId);if(matches.length!==1)throw new RefundError(409,'refund_conflict','Unresolved refund requires provider reconciliation; a new charge will not be issued');remote=matches[0];}
-    else remote=await stripe(payment.mode as 'test'|'live').refunds.create({payment_intent:payment.paymentIntentId,amount,reverse_transfer:true,refund_application_fee:true,reason:(args.reason??undefined)as'duplicate'|'fraudulent'|'requested_by_customer'|undefined,metadata:{tollbooth_payment_id:payment.id,tenant_id:payment.tenantId,tollbooth_refund_id:refundId}},{idempotencyKey:`tollbooth-refund:${refundId}`});
+    if(Date.now()-preparedAt.getTime()>23*3600000){const matches=(await stripe(payment.mode as 'test'|'live').refunds.list({payment_intent:payment.paymentIntentId,limit:100},{stripeAccount})).data.filter(item=>item.metadata?.tollbooth_refund_id===refundId);if(matches.length!==1)throw new RefundError(409,'refund_conflict','Unresolved refund requires provider reconciliation; a new charge will not be issued');remote=matches[0];}
+    else remote=await stripe(payment.mode as 'test'|'live').refunds.create({payment_intent:payment.paymentIntentId,amount,refund_application_fee:true,reason:(args.reason??undefined)as'duplicate'|'fraudulent'|'requested_by_customer'|undefined,metadata:{tollbooth_payment_id:payment.id,tenant_id:payment.tenantId,tollbooth_refund_id:refundId}},{stripeAccount,idempotencyKey:`tollbooth-refund:${refundId}`});
     if(remote.amount!==amount||remote.currency!==payment.currency||remote.metadata?.tollbooth_payment_id!==payment.id||remote.metadata?.tollbooth_refund_id!==refundId)throw new RefundError(409,'refund_conflict','Provider refund identity or amount mismatch');
   }catch(error){await operation?.assertOwnership();const definitive=typeof error==='object'&&error!==null&&'type'in error&&['StripeCardError','StripeInvalidRequestError','card_error','invalid_request_error'].includes(String(error.type));if(definitive){await db.update(schema.tollboothRefunds).set({status:'failed'}).where(eq(schema.tollboothRefunds.id,refundId));await db.update(schema.tollboothPayments).set({pendingRefundId:null,updatedAt:new Date()}).where(and(eq(schema.tollboothPayments.id,payment.id),eq(schema.tollboothPayments.pendingRefundId,refundId)));}throw error;}
   await operation?.assertOwnership();
   return (await reconcileProviderRefund(remote))??refund;
 }
 
-/** Authoritative GETs settle a persisted operation; repeated events never add its amount twice. */
-export async function reconcileProviderRefund(remote:Stripe.Refund,eventMode?:"test"|"live"):Promise<TbRefund|undefined>{
+/** Re-reads a pending refund from the workspace's Stripe account and settles it. */
+export async function refreshRefund(refund:TbRefund,mode:"test"|"live"):Promise<TbRefund>{
+  if(refund.status!=='pending'||!refund.stripeRefundId)return refund;
+  const remote=await stripe(mode).refunds.retrieve(refund.stripeRefundId,{},{stripeAccount:await accountOf(refund.tenantId)});
+  return (await reconcileProviderRefund(remote))??refund;
+}
+
+/**
+ * Authoritative GETs settle a persisted operation; repeated events never add its amount twice.
+ *
+ * `eventAccount` is the Stripe account a webhook came from. A refund event from any
+ * account other than the workspace's own is ignored: its metadata could say anything.
+ */
+export async function reconcileProviderRefund(remote:Stripe.Refund,eventMode?:"test"|"live",eventAccount?:string|null):Promise<TbRefund|undefined>{
  const id=remote.metadata?.tollbooth_refund_id;
  if(!id||!/^[-a-f0-9]{36}$/i.test(id))return undefined;
  const [refund]=await db.select().from(schema.tollboothRefunds).where(eq(schema.tollboothRefunds.id,id));if(!refund)return undefined;
  const [payment]=await db.select().from(schema.tollboothPayments).where(and(eq(schema.tollboothPayments.id,refund.paymentId),eq(schema.tollboothPayments.tenantId,refund.tenantId)));if(!payment)return undefined;
+ const stripeAccount=await accountOf(payment.tenantId);
+ if(eventAccount!==undefined&&eventAccount!==stripeAccount)return undefined;
  if(remote.metadata?.tenant_id!==payment.tenantId||remote.metadata?.tollbooth_payment_id!==payment.id||remote.amount!==refund.amount||remote.currency!==payment.currency||(refund.stripeRefundId&&refund.stripeRefundId!==remote.id))throw new RefundError(409,'refund_conflict','Provider refund identity or amount mismatch');
  if(eventMode&&eventMode!==payment.mode)throw new RefundError(409,'refund_conflict','Provider refund mode mismatch');
- remote=await stripe(payment.mode as 'test'|'live').refunds.retrieve(remote.id);
+ remote=await stripe(payment.mode as 'test'|'live').refunds.retrieve(remote.id,{},{stripeAccount});
  if(remote.metadata?.tenant_id!==payment.tenantId||remote.metadata?.tollbooth_payment_id!==payment.id||remote.metadata?.tollbooth_refund_id!==refund.id||remote.amount!==refund.amount||remote.currency!==payment.currency)throw new RefundError(409,'refund_conflict','Provider refund identity or amount mismatch');
  const chargeId=typeof remote.charge==='string'?remote.charge:remote.charge?.id;if(!chargeId)throw new RefundError(409,'refund_conflict','Provider refund charge is missing');
- const charge=await stripe(payment.mode as 'test'|'live').charges.retrieve(chargeId);const intent=typeof charge.payment_intent==='string'?charge.payment_intent:charge.payment_intent?.id;
+ const charge=await stripe(payment.mode as 'test'|'live').charges.retrieve(chargeId,{},{stripeAccount});const intent=typeof charge.payment_intent==='string'?charge.payment_intent:charge.payment_intent?.id;
  if(intent!==payment.paymentIntentId||charge.currency!==payment.currency||charge.livemode!==(payment.mode==='live')||charge.amount_refunded<0||charge.amount_refunded>payment.amount||(remote.status==='succeeded'&&charge.amount_refunded<refund.amount))throw new RefundError(409,'refund_conflict','Provider refund charge or mode mismatch');
  if(refund.status==='succeeded'&&remote.status!=='succeeded')return refund;
  const status=remote.status==='succeeded'||remote.status==='pending'?remote.status:remote.status==='canceled'?'canceled':'failed';

@@ -295,8 +295,8 @@ await tollbooth.checkout.create({ price: "vip_ticket" })`}</Code>
           <h2 className="text-2xl font-semibold tracking-tight">Refunds</h2>
           <p className="mt-3 text-muted">
             Refunds a payment in full by default, or <code className="font-mono text-text">amount</code> for a partial one. The share of
-            Tollbooth's fee that covered the refunded money is returned to you, and the transfer to your account is reversed. Neither
-            happens unless you ask for it, so this call is doing real work for you.
+            Tollbooth's fee that covered the refunded money is returned to you automatically. Stripe keeps its own processing fee
+            on a refunded payment, as it does on any Stripe account.
           </p>
           <Endpoint method="POST" path="/refunds">
             <div>

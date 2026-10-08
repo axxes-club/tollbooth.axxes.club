@@ -61,12 +61,15 @@ describe("refunds", { skip }, () => {
     assert.equal(after.net_fee, 0, "nothing is kept on a fully refunded payment")
   })
 
-  test("asks Stripe to reverse the transfer and return the application fee", async () => {
+  test("refunds on the workspace's own account and returns the application fee", async () => {
     const payment = await paidPayment()
     await createRefund({ tenantId: TENANT, paymentId: payment.id, createdByKind: "api" })
 
-    const params = __stripe.calls("refunds.create")[0].args[0] as any
-    assert.equal(params.reverse_transfer, true, "money must go back to the merchant, not to us")
+    const [call] = __stripe.calls("refunds.create")
+    const params = call.args[0] as any
+    const [account] = await sql().query(`select stripe_account_id from tollbooth_accounts where tenant_id = $1`, [TENANT])
+    assert.equal((call.args[1] as any).stripeAccount, account.stripe_account_id, "the charge lives on the workspace's account")
+    assert.equal(params.reverse_transfer, undefined, "there is no transfer to reverse on a direct charge")
     assert.equal(params.refund_application_fee, true, "our fee must come back too")
     assert.equal(params.payment_intent, payment.paymentIntentId)
   })

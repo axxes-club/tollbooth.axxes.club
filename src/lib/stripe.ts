@@ -2,7 +2,7 @@ import "server-only"
 import Stripe from "stripe"
 import type { TbMode } from "@/lib/db/schema/tollbooth"
 
-// Same Stripe platform account as afters.am; Tollbooth is the Connect platform.
+// Tollbooth's own Stripe account ("tollbooth by AXXES") is the Connect platform.
 // A separate key per mode keeps test-mode money strictly inside Stripe's test mode.
 const clients: Partial<Record<TbMode, Stripe>> = {}
 

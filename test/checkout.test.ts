@@ -82,7 +82,9 @@ describe("checkout", { skip }, () => {
     assert.equal(params.mode, "payment")
     assert.equal(params.line_items[0].price_data.unit_amount, 2500)
     assert.equal(params.payment_intent_data.application_fee_amount, 25, "our fee is claimed at checkout")
-    assert.equal(params.payment_intent_data.transfer_data.destination, account, "money is routed to the workspace")
+    assert.equal(params.payment_intent_data.transfer_data, undefined, "no destination charge: Tollbooth never holds the money")
+    const options = calls[0].args[1] as any
+    assert.equal(options.stripeAccount, account, "the charge is created on the workspace's own Stripe account")
   })
 
   test("quantity multiplies the amount and the fee", async () => {

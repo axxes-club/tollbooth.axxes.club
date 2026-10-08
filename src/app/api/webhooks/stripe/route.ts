@@ -5,6 +5,7 @@ import { db, schema } from "@/lib/db"
 import { stripe } from "@/lib/stripe"
 import { reconcileProviderRefund } from "@/lib/refunds"
 import { markSucceeded, markTerminal } from "@/lib/payments"
+import { isUuid } from "@/lib/fees"
 import { deliverPending, emit, emitPayment } from "@/lib/webhooks"
 
 // Stripe retries for up to 3 days, so this handler must answer fast. State changes
@@ -14,10 +15,10 @@ export const maxDuration = 30
 /**
  * Stripe → Tollbooth.
  *
- * One endpoint serves both the platform account and the Connect account, because a
- * connected account's onboarding events (`account.updated`) arrive on their own
- * endpoint with a different signing secret. `STRIPE_WEBHOOK_SECRET` holds both,
- * comma-separated.
+ * One URL serves both the platform endpoint and the Connect endpoint, each with its
+ * own signing secret; `STRIPE_WEBHOOK_SECRET` holds them comma-separated. Payments
+ * are direct charges on each workspace's own account, so checkout, charge, refund,
+ * dispute, payout and `account.updated` events all arrive through the Connect endpoint.
  */
 export async function POST(req: Request) {
   const secrets = (process.env.STRIPE_WEBHOOK_SECRET ?? "")
@@ -97,6 +98,40 @@ export async function POST(req: Request) {
   return NextResponse.json({ received: true, duplicate: !inserted.length })
 }
 
+/**
+ * The workspace that owns the Stripe account an event came from.
+ *
+ * An event that names no account, or one no workspace owns, can't move any
+ * workspace's money.
+ */
+async function ownerOf(event: Stripe.Event): Promise<string | null> {
+  if (!event.account) return null
+  const [row] = await db
+    .select({ tenantId: schema.tollboothAccounts.tenantId })
+    .from(schema.tollboothAccounts)
+    .where(eq(schema.tollboothAccounts.stripeAccountId, event.account))
+  return row?.tenantId ?? null
+}
+
+/**
+ * The payment an event refers to, only if the event came from the account of the
+ * workspace that created it, and (for Checkout events) from the session Tollbooth
+ * opened. Metadata is written by whoever creates the session, so it is a hint, not
+ * proof of ownership.
+ */
+async function paymentFor(event: Stripe.Event, paymentId: string | null | undefined, sessionId?: string) {
+  if (!paymentId || !isUuid(paymentId)) return null
+  const tenantId = await ownerOf(event)
+  if (!tenantId) return null
+  const [payment] = await db
+    .select()
+    .from(schema.tollboothPayments)
+    .where(and(eq(schema.tollboothPayments.id, paymentId), eq(schema.tollboothPayments.tenantId, tenantId)))
+  if (!payment) return null
+  if (sessionId && payment.checkoutSessionId !== sessionId) return null
+  return payment
+}
+
 async function handle(event: Stripe.Event) {
   const payments = schema.tollboothPayments
   const now = new Date()
@@ -107,9 +142,9 @@ async function handle(event: Stripe.Event) {
       const session = event.data.object
       // `unpaid` here means an async method is still clearing; the async event settles it.
       if (session.payment_status !== "paid") break
-      const paymentId = session.metadata?.tollbooth_payment_id ?? session.client_reference_id
-      if (!paymentId) break
-      await markSucceeded(paymentId, {
+      const payment = await paymentFor(event, session.metadata?.tollbooth_payment_id ?? session.client_reference_id, session.id)
+      if (!payment) break
+      await markSucceeded(payment.id, {
         paymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id,
         customerEmail: session.customer_details?.email ?? session.customer_email ?? null,
       })
@@ -118,36 +153,41 @@ async function handle(event: Stripe.Event) {
 
     case "checkout.session.async_payment_failed": {
       const session = event.data.object
-      const paymentId = session.metadata?.tollbooth_payment_id ?? session.client_reference_id
-      if (paymentId) await markTerminal(paymentId, "failed", "The customer's payment method was declined")
+      const payment = await paymentFor(event, session.metadata?.tollbooth_payment_id ?? session.client_reference_id, session.id)
+      if (payment) await markTerminal(payment.id, "failed", "The customer's payment method was declined")
       break
     }
 
     case "checkout.session.expired": {
-      const paymentId = event.data.object.metadata?.tollbooth_payment_id ?? event.data.object.client_reference_id
-      if (paymentId) await markTerminal(paymentId, "expired", "The checkout page expired before it was paid")
+      const session = event.data.object
+      const payment = await paymentFor(event, session.metadata?.tollbooth_payment_id ?? session.client_reference_id, session.id)
+      if (payment) await markTerminal(payment.id, "expired", "The checkout page expired before it was paid")
       break
     }
 
     // A PaymentIntent can fail before Checkout reports it, e.g. a blocked card.
     case "payment_intent.payment_failed": {
       const intent = event.data.object
-      const paymentId = intent.metadata?.tollbooth_payment_id
-      if (paymentId) await markTerminal(paymentId, "failed", intent.last_payment_error?.message ?? "The payment failed")
+      const payment = await paymentFor(event, intent.metadata?.tollbooth_payment_id)
+      if (payment && (!payment.paymentIntentId || payment.paymentIntentId === intent.id))
+        await markTerminal(payment.id, "failed", intent.last_payment_error?.message ?? "The payment failed")
       break
     }
 
     case "refund.updated":
     case "refund.created":
     case "refund.failed": {
-      await reconcileProviderRefund(event.data.object,event.livemode?"live":"test");
+      // A refund on a direct charge only exists on the workspace's own account.
+      if (!event.account) break
+      await reconcileProviderRefund(event.data.object, event.livemode ? "live" : "test", event.account)
       break;
     }
 
     case "charge.refunded": {
       const charge = event.data.object
       const paymentIntent = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id
-      if (!paymentIntent) break
+      const tenantId = await ownerOf(event)
+      if (!paymentIntent || !tenantId) break
 
       // Stripe is the source of truth for how much has been given back; our own
       // counter can drift if a refund was issued in the Stripe dashboard.
@@ -162,7 +202,7 @@ async function handle(event: Stripe.Event) {
           netFee: sql`greatest(0, ${payments.applicationFee} - floor(${payments.applicationFee} * greatest(${payments.amountRefunded},${charge.amount_refunded}) / greatest(${payments.amount}, 1)))`,
           updatedAt: now,
         })
-        .where(and(eq(payments.paymentIntentId, paymentIntent),eq(payments.mode,event.livemode?"live":"test"),sql`${charge.amount_refunded} between 0 and ${payments.amount}`))
+        .where(and(eq(payments.paymentIntentId, paymentIntent),eq(payments.tenantId, tenantId),eq(payments.mode,event.livemode?"live":"test"),sql`${charge.amount_refunded} between 0 and ${payments.amount}`))
         .returning()
 
       if (updated) {
@@ -176,20 +216,22 @@ async function handle(event: Stripe.Event) {
     case "charge.succeeded": {
       const charge = event.data.object
       const paymentIntent = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id
-      if (paymentIntent) {
+      const tenantId = await ownerOf(event)
+      if (paymentIntent && tenantId) {
         await db
           .update(payments)
           .set({ chargeId: charge.id, updatedAt: now })
-          .where(eq(payments.paymentIntentId, paymentIntent))
+          .where(and(eq(payments.paymentIntentId, paymentIntent), eq(payments.tenantId, tenantId)))
       }
       break
     }
 
-    // A disputed charge reverses the transfer and the fee, with no refund object.
+    // A dispute holds the disputed amount on the workspace's account, with no refund object.
     case "charge.dispute.created": {
       const dispute = event.data.object
       const chargeId = typeof dispute.charge === "string" ? dispute.charge : dispute.charge?.id
-      if (!chargeId) break
+      const tenantId = await ownerOf(event)
+      if (!chargeId || !tenantId) break
       const [disputed] = await db
         .update(payments)
         .set({
@@ -197,7 +239,7 @@ async function handle(event: Stripe.Event) {
           lastError: `Disputed: ${dispute.reason ?? "unknown reason"} (${dispute.amount} ${dispute.currency})`,
           updatedAt: now,
         })
-        .where(eq(payments.chargeId, chargeId))
+        .where(and(eq(payments.chargeId, chargeId), eq(payments.tenantId, tenantId)))
         .returning()
       if (disputed) {
         await emit("payment.disputed", disputed.tenantId, disputed.mode as "live" | "test", {
@@ -217,12 +259,13 @@ async function handle(event: Stripe.Event) {
     case "charge.dispute.closed": {
       const dispute = event.data.object
       const chargeId = typeof dispute.charge === "string" ? dispute.charge : dispute.charge?.id
-      if (!chargeId) break
+      const tenantId = await ownerOf(event)
+      if (!chargeId || !tenantId) break
       // Won or lost: either way the payment is settled and needs no action.
       const [closed] = await db
         .update(payments)
         .set({ status: "succeeded", lastError: null, updatedAt: now })
-        .where(and(eq(payments.chargeId, chargeId), eq(payments.status, "disputed")))
+        .where(and(eq(payments.chargeId, chargeId), eq(payments.tenantId, tenantId), eq(payments.status, "disputed")))
         .returning()
       if (closed) {
         await emitPayment(closed, "payment.succeeded", { status: "disputed" }).catch(() => {})
