@@ -15,6 +15,8 @@ import { __stripe } from "./fakes/stripe"
 
 const SUITE = suiteFor("stripehook")
 const TENANT = SUITE.tenant
+/** A second workspace, for events that come from someone else's Stripe account. */
+const OTHER = suiteFor("stripehook-other")
 const SECRET = "whsec_stripe_inbound"
 const skip = process.env.DATABASE_URL ? false : "DATABASE_URL not set"
 
@@ -27,12 +29,16 @@ describe("stripe webhook", { skip }, () => {
 
   beforeEach(async () => {
     await resetTestData(SUITE)
+    await resetTestData(OTHER)
     __stripe.reset()
     process.env.STRIPE_WEBHOOK_SECRET = SECRET
     account = await seedReadyAccount(TENANT)
     __stripe.account(account)
   })
-  after(() => resetTestData(SUITE))
+  after(async () => {
+    await resetTestData(SUITE)
+    await resetTestData(OTHER)
+  })
 
   const send = (event: Record<string, unknown>, { secret = SECRET } = {}) => {
     const body = JSON.stringify(event)
@@ -45,18 +51,19 @@ describe("stripe webhook", { skip }, () => {
     })
   }
 
-  const completed = (paymentId: string, id = nextId("completed"), extra: Record<string, unknown> = {}) => ({
+  type Paid = { id: string; checkoutSessionId: string | null }
+  const completed = (payment: Paid, id = nextId("completed"), extra: Record<string, unknown> = {}, from: string | null = account) => ({
     id,
     type: "checkout.session.completed",
     livemode: false,
-    account,
+    ...(from ? { account: from } : {}),
     data: {
       object: {
-        id: "cs_test_1",
+        id: payment.checkoutSessionId,
         payment_status: "paid",
         payment_intent: "pi_test_1",
-        client_reference_id: paymentId,
-        metadata: { tollbooth_payment_id: paymentId, tenant_id: TENANT },
+        client_reference_id: payment.id,
+        metadata: { tollbooth_payment_id: payment.id, tenant_id: TENANT },
         customer_details: { email: "buyer@test.com" },
         ...extra,
       },
@@ -76,7 +83,7 @@ describe("stripe webhook", { skip }, () => {
     const unsigned = new Request("https://tollbooth.test/api/webhooks/stripe", { method: "POST", body: "{}" })
     assert.equal((await POST(unsigned)).status, 400)
 
-    assert.equal((await POST(send(completed(payment.id), { secret: "whsec_wrong" }))).status, 400)
+    assert.equal((await POST(send(completed(payment), { secret: "whsec_wrong" }))).status, 400)
 
     const [after] = await sql().query(`select status from tollbooth_payments where id = $1`, [payment.id])
     assert.equal(after.status, "pending", "a payment must not be marked paid by a bad request")
@@ -84,7 +91,7 @@ describe("stripe webhook", { skip }, () => {
 
   test("a completed checkout marks the payment paid and records the buyer", async () => {
     const payment = await pendingPayment()
-    const res = await POST(send(completed(payment.id)))
+    const res = await POST(send(completed(payment)))
     assert.equal(res.status, 200)
     assert.deepEqual(await res.json(), { received: true, duplicate: false })
 
@@ -100,7 +107,7 @@ describe("stripe webhook", { skip }, () => {
     const payment = await pendingPayment()
     // One id, sent twice: this is the retry Stripe performs, and the whole reason the
     // dedupe table exists.
-    const event = completed(payment.id, nextId("retry"))
+    const event = completed(payment, nextId("retry"))
 
     assert.equal((await POST(send(event))).status, 200)
     const second = await POST(send(event))
@@ -111,8 +118,8 @@ describe("stripe webhook", { skip }, () => {
   test("an expired checkout is marked expired", async () => {
     const payment = await pendingPayment()
     await POST(send({
-      id: nextId("expired"), type: "checkout.session.expired", livemode: false,
-      data: { object: { id: "cs_1", client_reference_id: payment.id, metadata: { tollbooth_payment_id: payment.id } } },
+      id: nextId("expired"), type: "checkout.session.expired", livemode: false, account,
+      data: { object: { id: payment.checkoutSessionId, client_reference_id: payment.id, metadata: { tollbooth_payment_id: payment.id } } },
     }))
     const [after] = await sql().query(`select status from tollbooth_payments where id = $1`, [payment.id])
     assert.equal(after.status, "expired")
@@ -121,8 +128,8 @@ describe("stripe webhook", { skip }, () => {
   test("a failed async payment is marked failed", async () => {
     const payment = await pendingPayment()
     await POST(send({
-      id: nextId("failed"), type: "checkout.session.async_payment_failed", livemode: false,
-      data: { object: { id: "cs_1", client_reference_id: payment.id, metadata: { tollbooth_payment_id: payment.id } } },
+      id: nextId("failed"), type: "checkout.session.async_payment_failed", livemode: false, account,
+      data: { object: { id: payment.checkoutSessionId, client_reference_id: payment.id, metadata: { tollbooth_payment_id: payment.id } } },
     }))
     const [after] = await sql().query(`select status from tollbooth_payments where id = $1`, [payment.id])
     assert.equal(after.status, "failed")
@@ -131,17 +138,17 @@ describe("stripe webhook", { skip }, () => {
   test("a payment still awaiting an async method is left pending", async () => {
     // `completed` can arrive before an async method settles; the async event decides.
     const payment = await pendingPayment()
-    await POST(send(completed(payment.id, nextId("unpaid"), { payment_status: "unpaid" })))
+    await POST(send(completed(payment, nextId("unpaid"), { payment_status: "unpaid" })))
     const [after] = await sql().query(`select status from tollbooth_payments where id = $1`, [payment.id])
     assert.equal(after.status, "pending")
   })
 
   test("a refund issued in Stripe's dashboard is reflected", async () => {
     const payment = await pendingPayment()
-    await POST(send(completed(payment.id)))
+    await POST(send(completed(payment)))
 
     await POST(send({
-      id: nextId("refunded"), type: "charge.refunded", livemode: false,
+      id: nextId("refunded"), type: "charge.refunded", livemode: false, account,
       data: { object: { id: "ch_1", payment_intent: "pi_test_1", amount_refunded: 1000, refunded: false, currency: "usd", amount: 2500 } },
     }))
 
@@ -153,12 +160,12 @@ describe("stripe webhook", { skip }, () => {
 
   test("a dispute flags the payment so it can be acted on", async () => {
     const payment = await pendingPayment()
-    await POST(send(completed(payment.id)))
+    await POST(send(completed(payment)))
     // A dispute references a charge, so the charge id has to be known first.
     await sql().query(`update tollbooth_payments set charge_id = 'ch_test_1' where id = $1`, [payment.id])
 
     await POST(send({
-      id: nextId("dispute"), type: "charge.dispute.created", livemode: false,
+      id: nextId("dispute"), type: "charge.dispute.created", livemode: false, account,
       data: { object: { id: "dp_1", charge: "ch_test_1", amount: 2500, currency: "usd", reason: "fraudulent", status: "needs_response", evidence_details: { due_by: 1 } } },
     }))
 
@@ -169,7 +176,7 @@ describe("stripe webhook", { skip }, () => {
 
   test("account.updated syncs the workspace's readiness", async () => {
     await POST(send({
-      id: nextId("account"), type: "account.updated", livemode: false,
+      id: nextId("account"), type: "account.updated", livemode: false, account,
       data: { object: { id: account, charges_enabled: false, payouts_enabled: false, details_submitted: true, country: "GB", default_currency: "gbp", requirements: { currently_due: ["company.tax_id"] } } },
     }))
 
@@ -181,8 +188,37 @@ describe("stripe webhook", { skip }, () => {
     assert.deepEqual(after.requirements_due, ["company.tax_id"], "what Stripe still needs is surfaced")
   })
 
+  test("only the workspace's own Stripe account can settle its payment", async () => {
+    const payment = await pendingPayment()
+    const other = await seedReadyAccount(OTHER.tenant)
+
+    // Another workspace's account, an event naming no account, and a session
+    // Tollbooth didn't open all carry this payment's id in metadata. None of them
+    // is proof that this workspace was paid.
+    assert.equal((await POST(send(completed(payment, nextId("other"), {}, other)))).status, 200)
+    assert.equal((await POST(send(completed(payment, nextId("noacct"), {}, null)))).status, 200)
+    assert.equal((await POST(send(completed({ ...payment, checkoutSessionId: "cs_forged" }, nextId("forged"))))).status, 200)
+
+    const [after] = await sql().query(`select status from tollbooth_payments where id = $1`, [payment.id])
+    assert.equal(after.status, "pending")
+  })
+
+  test("a refund on another account doesn't touch this workspace's payment", async () => {
+    const payment = await pendingPayment()
+    await POST(send(completed(payment)))
+    const other = await seedReadyAccount(OTHER.tenant)
+
+    await POST(send({
+      id: nextId("otherrefund"), type: "charge.refunded", livemode: false, account: other,
+      data: { object: { id: "ch_1", payment_intent: "pi_test_1", amount_refunded: 2500, refunded: true, currency: "usd", amount: 2500 } },
+    }))
+    const [after] = await sql().query(`select status, amount_refunded from tollbooth_payments where id = $1`, [payment.id])
+    assert.equal(after.status, "succeeded")
+    assert.equal(after.amount_refunded, 0)
+  })
+
   test("an event for a payment we do not have is harmless", async () => {
-    const res = await POST(send(completed("11111111-1111-4111-8111-111111111111")))
+    const res = await POST(send(completed({ id: "11111111-1111-4111-8111-111111111111", checkoutSessionId: "cs_unknown" })))
     assert.equal(res.status, 200)
   })
 

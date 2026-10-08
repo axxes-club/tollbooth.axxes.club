@@ -12,8 +12,8 @@ const EXAMPLES = [500, 2500, 10_000, 25_000].map((amount) => ({
 }))
 
 const FAQ = [
-  { q: "What's in the fee, exactly?", a: "Tollbooth takes a percentage of each successful payment, before it reaches your payout account. Stripe then takes its own standard processing fee on top — typically 2.9% + 30¢ for a US card. Both are visible; neither is hidden in a fee you discover later." },
-  { q: "What does a refund cost me?", a: "Nothing extra. The slice of our fee that covered the refunded amount is returned to you automatically, and the transfer back to your account is reversed. A full refund puts you back where you started." },
+  { q: "What's in the fee, exactly?", a: "Stripe takes its standard processing fee — typically 2.9% + 30¢ for a US card — and Tollbooth takes its percentage on top. Both come out of each successful payment before it reaches your bank. Both are visible; neither is hidden in a fee you discover later." },
+  { q: "What does a refund cost me?", a: "Nothing extra from Tollbooth: the slice of our fee that covered the refunded amount is returned to you automatically. Stripe keeps its processing fee on a refunded payment, as it does on any Stripe account." },
   { q: "When do I get paid?", a: "On Stripe's rolling schedule, once your payout account is verified — usually two business days in the US. Your dashboard shows available, pending and the next payout date, read live from Stripe rather than estimated." },
   { q: "Do I pay anything while I'm building?", a: "No. Test-mode keys can only move money inside Stripe's test environment, so the entire integration can be built and exercised at no cost. You only start paying when a live key takes a real payment." },
   { q: "Is there a minimum or a contract?", a: "No minimum, no contract, no monthly fee. Cancel by not using it. Your payment history and receipts stay available to you either way." },

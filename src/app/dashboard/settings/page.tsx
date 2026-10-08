@@ -4,7 +4,7 @@ import { PageHeader, StatusBadge, Field, Notice } from "@/components/ui"
 import { feeDescription, formatMoney } from "@/lib/fees"
 import { stripeMode, stripeConfigured } from "@/lib/stripe"
 import { getAccount } from "../queries"
-import { openStripeDashboard, refreshAccountAction, startOnboarding } from "../actions"
+import { refreshAccountAction, startOnboarding, updatePayoutDetails } from "../actions"
 
 const dateFmt = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" })
 
@@ -49,7 +49,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <section className="card p-6">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <h2 className="font-medium">Stripe payout account</h2>
+                <h2 className="font-medium">Payout account</h2>
                 <p className="mt-1 text-sm text-muted">
                   {account ? <span className="font-mono text-xs">{account.stripeAccountId}</span> : "Not connected yet."}
                   {account?.country && ` · ${account.country}`}
@@ -85,12 +85,12 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <div className="mt-6 flex flex-wrap gap-2">
               {canManage && !ready && (
                 <form action={startOnboarding}>
-                  <button className="btn-primary">{account ? "Continue setup with Stripe" : "Set up payouts with Stripe"}</button>
+                  <button className="btn-primary">{account ? "Continue payout setup" : "Set up payouts"}</button>
                 </form>
               )}
               {canManage && account?.detailsSubmitted && (
-                <form action={openStripeDashboard}>
-                  <button className="btn-ghost">Open Stripe dashboard</button>
+                <form action={updatePayoutDetails}>
+                  <button className="btn-ghost">Update payout details</button>
                 </form>
               )}
               {account && (

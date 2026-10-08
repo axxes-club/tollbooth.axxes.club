@@ -99,11 +99,27 @@ tables shared with members.axxes.club. It's safe to re-run.
 
 ## How money moves
 
-Each workspace gets its own Stripe Express (Connect) account. Checkout is a
-destination charge: the payment lands in the merchant's account, and Tollbooth
-takes `TOLLBOOTH_FEE_BPS` (default 1%) plus `TOLLBOOTH_FEE_FIXED` as the
-application fee. Refunds reverse the transfer and return the proportional fee, so
-refunding doesn't cost the merchant twice.
+Each workspace gets its own Stripe connected account, created with controller
+properties rather than a legacy account type:
+
+| Property | Value | Meaning |
+| --- | --- | --- |
+| `stripe_dashboard.type` | `none` | The merchant never sees Stripe; Tollbooth is the whole interface |
+| `fees.payer` | `account` | Stripe bills its processing fee to the merchant's account |
+| `losses.payments` | `stripe` | Stripe, not Tollbooth, covers negative balances and chargebacks |
+| `requirement_collection` | `stripe` | Stripe decides what identity and bank details the law requires |
+
+Checkout is a **direct charge** on that account. Stripe deducts its processing fee,
+and Tollbooth takes `TOLLBOOTH_FEE_BPS` (default 1%) plus `TOLLBOOTH_FEE_FIXED` on top
+as an application fee. The merchant fills in Stripe's verification form once, opened
+from Tollbooth; Stripe issues only `account_onboarding` links for these accounts, so
+the same link is how they later change bank or business details. Refunds are issued
+on the merchant's account and return the proportional application fee; Stripe keeps
+its own processing fee on refunded payments.
+
+Every webhook that moves money must name the workspace's own account
+(`event.account`), and Checkout events must match the session Tollbooth opened.
+Metadata alone never settles a payment.
 
 ## Test vs live
 
@@ -193,11 +209,14 @@ See `.env.example` for the full annotated list. Required to take payments:
 
 ## Stripe setup
 
-1. Enable Connect (Express) on the platform account.
-2. Add `https://tollbooth.axxes.club/api/webhooks/stripe` for
-   `checkout.session.completed`, `checkout.session.expired`,
+1. Enable Connect on the platform account, with the "merchants collect payments
+   directly" business model.
+2. Add `https://tollbooth.axxes.club/api/webhooks/stripe` as a **Connect** endpoint
+   for `checkout.session.completed`, `checkout.session.expired`,
    `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
    `payment_intent.payment_failed`, `charge.succeeded`, `charge.refunded`,
-   `charge.dispute.created`, `charge.dispute.closed`, `payout.paid`, `payout.failed`.
-3. Add the same URL as a **Connect** endpoint for `account.updated`.
-4. Put both signing secrets in `STRIPE_WEBHOOK_SECRET`, comma-separated.
+   `charge.dispute.created`, `charge.dispute.closed`, `refund.created`,
+   `refund.updated`, `refund.failed`, `account.updated`, `payout.paid`,
+   `payout.failed` and `payout.canceled`. Payments are direct charges, so all of
+   these arrive from connected accounts.
+3. Put every endpoint's signing secret in `STRIPE_WEBHOOK_SECRET`, comma-separated.

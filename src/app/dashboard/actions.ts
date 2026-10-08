@@ -3,7 +3,7 @@
 import { headers } from "next/headers"
 import { redirect } from "next/navigation"
 import { revalidatePath } from "next/cache"
-import { and, eq, isNull, sql } from "drizzle-orm"
+import { and, eq, isNotNull, isNull, sql } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { requireContext } from "@/lib/context"
 import { stripe, stripeMode } from "@/lib/stripe"
@@ -12,7 +12,7 @@ import { createRefund, RefundError } from "@/lib/refunds"
 import { safeUrl } from "@/lib/payments"
 import { uniqueLinkSlug } from "@/lib/slugs"
 import { replayDelivery, sendEndpointTest, WEBHOOK_EVENTS } from "@/lib/webhooks"
-import { syncAccount } from "@/lib/accounts"
+import { hasPayoutController, PAYOUT_ACCOUNT_CONTROLLER, syncAccount } from "@/lib/accounts"
 import { CURRENCIES, parseMoney, minimumCharge, formatMoney, isUuid } from "@/lib/fees"
 import type { TbMode } from "@/lib/db/schema/tollbooth"
 
@@ -51,30 +51,66 @@ export async function refreshAccountAction() {
   await refreshAccount()
 }
 
-/** Creates the Express account on first use, then sends the owner through Stripe. */
+/**
+ * The workspace's payout account on this platform, created on first use.
+ *
+ * A stored account that this platform can't see (it belonged to a previous Stripe
+ * platform), or that was configured another way and never took a payment, is
+ * replaced: the controller can only be set when an account is created.
+ */
+async function ensurePayoutAccount(ctx: Awaited<ReturnType<typeof requireManager>>, mode: TbMode) {
+  const [existing] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, ctx.tenant.id))
+  if (existing) {
+    const remote = await stripe(mode)
+      .accounts.retrieve(existing.stripeAccountId)
+      .catch((err: { code?: string }) => {
+        if (err?.code === "resource_missing") return null
+        throw err
+      })
+    if (remote && (hasPayoutController(remote) || existing.chargesEnabled)) return existing
+    // Refunds for past payments are issued on the account that took them.
+    const [charged] = await db
+      .select({ id: schema.tollboothPayments.id })
+      .from(schema.tollboothPayments)
+      .where(and(eq(schema.tollboothPayments.tenantId, ctx.tenant.id), isNotNull(schema.tollboothPayments.paymentIntentId)))
+      .limit(1)
+    if (remote && charged) return existing
+  }
+
+  const created = await stripe(mode).accounts.create({
+    controller: PAYOUT_ACCOUNT_CONTROLLER,
+    email: ctx.user.email,
+    business_profile: { name: ctx.tenant.name },
+    capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
+    metadata: { tenant_id: ctx.tenant.id, source: "tollbooth" },
+  })
+  const fresh = {
+    stripeAccountId: created.id,
+    chargesEnabled: 0,
+    payoutsEnabled: 0,
+    detailsSubmitted: 0,
+    chargesDisabledReason: null,
+    requirementsDue: [],
+    updatedAt: new Date(),
+  }
+  const [account] = await db
+    .insert(schema.tollboothAccounts)
+    .values({ tenantId: ctx.tenant.id, ...fresh })
+    .onConflictDoUpdate({ target: schema.tollboothAccounts.tenantId, set: fresh })
+    .returning()
+  return account!
+}
+
+/** Creates the payout account on first use, then sends the owner through Stripe's verification form. */
 export async function startOnboarding(formData?: FormData) {
   const ctx = await requireManager()
   const mode = formData?.get("mode") ?? stripeMode()
   if (mode !== "live" && mode !== "test") throw new Error("Choose test or live mode")
-  let [account] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, ctx.tenant.id))
-
-  if (!account) {
-    const created = await stripe(mode).accounts.create({
-      type: "express",
-      email: ctx.user.email,
-      business_profile: { name: ctx.tenant.name },
-      capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-      metadata: { tenant_id: ctx.tenant.id, source: "tollbooth" },
-    })
-    ;[account] = await db
-      .insert(schema.tollboothAccounts)
-      .values({ tenantId: ctx.tenant.id, stripeAccountId: created.id })
-      .returning()
-  }
+  const account = await ensurePayoutAccount(ctx, mode)
 
   const base = await origin()
   const link = await stripe(mode).accountLinks.create({
-    account: account!.stripeAccountId,
+    account: account.stripeAccountId,
     type: "account_onboarding",
     refresh_url: `${base}/dashboard/settings?onboarding=retry&mode=${mode}`,
     return_url: `${base}/dashboard/settings?onboarding=done&mode=${mode}`,
@@ -82,11 +118,24 @@ export async function startOnboarding(formData?: FormData) {
   redirect(link.url)
 }
 
-export async function openStripeDashboard() {
+/**
+ * Lets the owner change their bank or business details. Payout accounts have no
+ * Stripe dashboard, and Stripe only issues `account_onboarding` links for them; on a
+ * finished account that link opens the same form with the saved details to edit.
+ */
+export async function updatePayoutDetails() {
   const ctx = await requireManager()
   const [account] = await db.select().from(schema.tollboothAccounts).where(eq(schema.tollboothAccounts.tenantId, ctx.tenant.id))
   if (!account?.detailsSubmitted) throw new Error("Finish payout setup first")
-  const link = await stripe(stripeMode()).accounts.createLoginLink(account.stripeAccountId)
+  const mode = stripeMode()
+  const base = await origin()
+  const link = await stripe(mode).accountLinks.create({
+    account: account.stripeAccountId,
+    type: "account_onboarding",
+    collection_options: { fields: "eventually_due" },
+    refresh_url: `${base}/dashboard/settings?onboarding=retry&mode=${mode}`,
+    return_url: `${base}/dashboard/settings?onboarding=done&mode=${mode}`,
+  })
   redirect(link.url)
 }
 

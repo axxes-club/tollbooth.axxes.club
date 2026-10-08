@@ -7,6 +7,30 @@ import { __stripe } from "./fakes/stripe"
 const SUITE = suiteFor("actions")
 const context = require("@/lib/context")
 const cache = require("next/cache")
+const headers = require("next/headers")
+const navigation = require("next/navigation")
+
+/** Runs an action that ends in `redirect()` and returns where it was sent. */
+async function redirectedTo(run: () => Promise<unknown>): Promise<string> {
+  mock.method(headers, "headers", async () => new Headers({ host: "tollbooth.test", "x-forwarded-proto": "https" }))
+  mock.method(navigation, "redirect", (url: string) => {
+    throw Object.assign(new Error("redirect"), { url })
+  })
+  try {
+    await run()
+  } catch (err) {
+    if ((err as { url?: string }).url) return (err as { url: string }).url
+    throw err
+  }
+  throw new Error("expected a redirect")
+}
+
+const PAYOUT_CONTROLLER = {
+  stripe_dashboard: { type: "none" },
+  fees: { payer: "account" },
+  losses: { payments: "stripe" },
+  requirement_collection: "stripe",
+}
 
 describe("dashboard actions", { skip: !process.env.DATABASE_URL }, () => {
   beforeEach(async () => {
@@ -38,6 +62,49 @@ describe("dashboard actions", { skip: !process.env.DATABASE_URL }, () => {
     form.set("mode", "invalid")
     await assert.rejects(actions.startOnboarding(form), /mode/i)
     assert.equal(__stripe.calls("accounts.create").length, 0)
+  })
+
+  test("payout accounts make Stripe the fee payer and risk holder, with no Stripe dashboard", async () => {
+    const url = await redirectedTo(() => actions.startOnboarding(new FormData()))
+    assert.equal(url, "https://connect.stripe.test/setup")
+
+    const [create] = __stripe.calls("accounts.create")
+    const params = create.args[0] as any
+    assert.equal(params.type, undefined, "legacy account types would make Tollbooth pay fees and carry losses")
+    assert.deepEqual(params.controller, PAYOUT_CONTROLLER)
+    const [link] = __stripe.calls("accountLinks.create")
+    assert.equal((link.args[0] as any).type, "account_onboarding")
+  })
+
+  test("an account from another Stripe platform is replaced, not reused", async () => {
+    await seedReadyAccount(SUITE.tenant, "acct_previous_platform")
+    await sql().query(`update tollbooth_accounts set charges_enabled = 0 where tenant_id = $1`, [SUITE.tenant])
+    await redirectedTo(() => actions.startOnboarding(new FormData()))
+
+    assert.equal(__stripe.calls("accounts.create").length, 1)
+    const [row] = await sql().query(`select stripe_account_id, details_submitted from tollbooth_accounts where tenant_id = $1`, [SUITE.tenant])
+    assert.notEqual(row.stripe_account_id, "acct_previous_platform")
+    assert.equal(row.details_submitted, 0, "the new account starts unverified")
+  })
+
+  test("a correctly configured account is reused", async () => {
+    const id = await seedReadyAccount(SUITE.tenant, "acct_configured")
+    __stripe.account(id, { controller: PAYOUT_CONTROLLER })
+    await redirectedTo(() => actions.startOnboarding(new FormData()))
+
+    assert.equal(__stripe.calls("accounts.create").length, 0)
+    assert.equal((__stripe.calls("accountLinks.create")[0].args[0] as any).account, id)
+  })
+
+  test("payout details are edited through Stripe's form, not a Stripe dashboard login", async () => {
+    const id = await seedReadyAccount(SUITE.tenant, "acct_details")
+    __stripe.account(id, { controller: PAYOUT_CONTROLLER })
+    await redirectedTo(() => actions.updatePayoutDetails())
+
+    assert.equal(__stripe.calls("accounts.createLoginLink").length, 0)
+    const params = __stripe.calls("accountLinks.create")[0].args[0] as any
+    assert.equal(params.type, "account_onboarding")
+    assert.equal(params.account, id)
   })
 
   test("JPY prices use whole currency units", async () => {

@@ -2,7 +2,35 @@ import "server-only"
 import { eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
 import { stripe, stripeMode } from "@/lib/stripe"
+import type Stripe from "stripe"
 import type { TbMode } from "@/lib/db/schema/tollbooth"
+
+/**
+ * How every workspace's payout account is configured.
+ *
+ * The merchant never sees Stripe: no Stripe dashboard (`none`), so Tollbooth is the
+ * whole interface. Stripe still carries the risk: it bills its processing fee to the
+ * merchant's account (`fees.payer`), covers negative balances and chargebacks
+ * (`losses`), and decides what identity and bank details the law requires
+ * (`requirement_collection`). Tollbooth's fee is an application fee on top.
+ */
+export const PAYOUT_ACCOUNT_CONTROLLER = {
+  stripe_dashboard: { type: "none" },
+  fees: { payer: "account" },
+  losses: { payments: "stripe" },
+  requirement_collection: "stripe",
+} as const satisfies Stripe.AccountCreateParams.Controller
+
+/** True when an account was created with the controller above; it can't be changed afterwards. */
+export function hasPayoutController(remote: Pick<Stripe.Account, "controller">) {
+  const c = remote.controller
+  return (
+    c?.stripe_dashboard?.type === "none" &&
+    c?.fees?.payer === "account" &&
+    c?.losses?.payments === "stripe" &&
+    c?.requirement_collection === "stripe"
+  )
+}
 
 /**
  * Syncs the workspace's Stripe account state, balance and next payout.

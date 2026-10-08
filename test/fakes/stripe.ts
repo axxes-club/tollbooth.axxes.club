@@ -148,10 +148,10 @@ export default class FakeStripe {
     },
   }
 
-  charges={async retrieve(id:string){const custom=record('charges.retrieve',[id]);if(custom)return custom;const refunds=state().refunds.filter(refund=>refund.charge===id&&refund.status==='succeeded');return{id,payment_intent:id.replace(/^ch_/,''),currency:refunds[0]?.currency??'usd',livemode:false,amount_refunded:refunds.reduce((total,refund)=>total+refund.amount,0)};}};
+  charges={async retrieve(id:string,params?:any,options?:any){const custom=record('charges.retrieve',[id,params,options]);if(custom)return custom;const refunds=state().refunds.filter(refund=>refund.charge===id&&refund.status==='succeeded');return{id,payment_intent:id.replace(/^ch_/,''),currency:refunds[0]?.currency??'usd',livemode:false,amount_refunded:refunds.reduce((total,refund)=>total+refund.amount,0)};}};
   refunds = {
-    async retrieve(id:string){return record('refunds.retrieve',[id])??state().refunds.find(refund=>refund.id===id);},
-    async list(params:any){return record('refunds.list',[params])??{data:state().refunds.filter(refund=>refund.payment_intent===params.payment_intent)};},
+    async retrieve(id:string,params?:any,options?:any){return record('refunds.retrieve',[id,params,options])??state().refunds.find(refund=>refund.id===id);},
+    async list(params:any,options?:any){return record('refunds.list',[params,options])??{data:state().refunds.filter(refund=>refund.payment_intent===params.payment_intent)};},
     async create(params: any, options?: any) {
       const result = record("refunds.create", [params, options]) ?? {}
       const refund = { id: result.id ?? `re_${unique()}`, status: "succeeded", amount:params.amount,currency:state().sessions.find(session=>session.metadata?.tollbooth_payment_id===params.metadata?.tollbooth_payment_id)?.currency??"usd",payment_intent:params.payment_intent,charge:`ch_${params.payment_intent}`,metadata:params.metadata,...result }

@@ -109,16 +109,22 @@ export async function createCheckout(input:CreateCheckout):Promise<TbPayment>{
  const originalValues={id:plannedId,tenantId:input.tenantId,apiKeyId:input.apiKeyId??null,amount,currency:input.currency,applicationFee:fee,netFee:fee,description:input.description,customerEmail:input.customerEmail??null,customerId:input.customerId??null,priceId:input.priceId??null,linkId:input.linkId??null,reference:input.reference??null,metadata:input.metadata??{},source:input.source??'api',mode:input.mode,successUrl,expiresAt,status:'pending'};
  const savedValues=operation?.checkpoint?.paymentValues as typeof originalValues|undefined;
  const values=savedValues?{...savedValues,expiresAt:new Date(String(savedValues.expiresAt))}:originalValues;
- const originalParams:Stripe.Checkout.SessionCreateParams={mode:'payment',line_items:[{quantity:input.quantity??1,price_data:{currency:input.currency,unit_amount:input.amount,product_data:{name:input.description,...(input.metadata?.image_url?{images:[input.metadata.image_url]}:{})}}}],customer_email:input.customerEmail??undefined,success_url:successUrl?appendQuery(successUrl,{tollbooth_payment_id:plannedId}):new URL(`/pay/complete/${plannedId}`,site).toString(),cancel_url:cancelUrl||new URL(`/pay/cancelled/${plannedId}`,site).toString(),client_reference_id:plannedId,expires_at:Math.floor(expiresAt.getTime()/1000),metadata:{tollbooth_payment_id:plannedId,tenant_id:input.tenantId},payment_intent_data:{application_fee_amount:fee||undefined,transfer_data:{destination:account.stripeAccountId},metadata:{...input.metadata,tollbooth_payment_id:plannedId}}};
+ const originalParams:Stripe.Checkout.SessionCreateParams={mode:'payment',line_items:[{quantity:input.quantity??1,price_data:{currency:input.currency,unit_amount:input.amount,product_data:{name:input.description,...(input.metadata?.image_url?{images:[input.metadata.image_url]}:{})}}}],customer_email:input.customerEmail??undefined,success_url:successUrl?appendQuery(successUrl,{tollbooth_payment_id:plannedId}):new URL(`/pay/complete/${plannedId}`,site).toString(),cancel_url:cancelUrl||new URL(`/pay/cancelled/${plannedId}`,site).toString(),client_reference_id:plannedId,expires_at:Math.floor(expiresAt.getTime()/1000),metadata:{tollbooth_payment_id:plannedId,tenant_id:input.tenantId},payment_intent_data:{application_fee_amount:fee||undefined,metadata:{...input.metadata,tollbooth_payment_id:plannedId}}};
+ // A direct charge on the workspace's own account: Stripe takes its processing fee
+ // from the merchant, and Tollbooth's fee arrives as an application fee. A checkpoint
+ // saved before this change carries a destination charge and no account; it is
+ // replayed exactly as it was first sent.
+ const legacyDestination=Boolean((operation?.checkpoint?.stripeParams as Stripe.Checkout.SessionCreateParams|undefined)?.payment_intent_data?.transfer_data);
+ const stripeAccount=operation?.checkpoint?.stripeAccount?String(operation.checkpoint.stripeAccount):legacyDestination?undefined:account.stripeAccountId;
  const params=JSON.parse(JSON.stringify(operation?.checkpoint?.stripeParams??originalParams))as Stripe.Checkout.SessionCreateParams;
  const providerKey=String(operation?.checkpoint?.providerKey??`tollbooth-checkout:${plannedId}`);
  if(values.tenantId!==input.tenantId||values.mode!==input.mode||params.metadata?.tenant_id!==input.tenantId||params.client_reference_id!==plannedId)throw new IdempotencyError('Persisted checkout identity mismatch');
- if(operation&&!operation.checkpoint)await operation.saveCheckpoint({kind:'checkout',mode:input.mode,paymentId:plannedId,expiresAt:expiresAt.toISOString(),paymentValues:values,stripeParams:params,providerKey});
+ if(operation&&!operation.checkpoint)await operation.saveCheckpoint({kind:'checkout',mode:input.mode,paymentId:plannedId,expiresAt:expiresAt.toISOString(),paymentValues:values,stripeParams:params,stripeAccount,providerKey});
  await operation?.assertOwnership();
  const payment=existing??(await db.insert(schema.tollboothPayments).values(values).returning())[0];
  try{
   await operation?.assertOwnership();
-  const session=await client.checkout.sessions.create(params,{idempotencyKey:providerKey});
+  const session=await client.checkout.sessions.create(params,{stripeAccount,idempotencyKey:providerKey});
   await operation?.assertOwnership();
   const [updated]=await db.update(schema.tollboothPayments).set({checkoutSessionId:session.id,checkoutUrl:session.url,expiresAt:session.expires_at?new Date(session.expires_at*1000):expiresAt,updatedAt:new Date()}).where(eq(schema.tollboothPayments.id,payment.id)).returning();const settled=updated??payment;await emitPayment(settled,'payment.created').catch(()=>{});return settled;
  }catch(error){
