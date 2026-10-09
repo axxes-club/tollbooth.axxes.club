@@ -1,7 +1,18 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {db} from '../src/lib/db';
-import {rateLimit,RATE_LIMITS} from '../src/lib/rate-limit';
+import {rateLimit,rateAdmission,RATE_LIMITS} from '../src/lib/rate-limit';
+import {PgDialect} from 'drizzle-orm/pg-core';
+test('composite transactions set lock and statement deadlines before counters',async()=>{
+ const original=db.transaction;const statements:string[]=[];const dialect=new PgDialect();
+ db.transaction=(async(callback: (tx:unknown)=>Promise<boolean>)=>callback({execute:async(statement:Parameters<PgDialect['sqlToQuery']>[0])=>{
+  statements.push(dialect.sqlToQuery(statement).sql);return {rows:[{count:1,reset_at:new Date().toISOString()}]};
+ }})) as unknown as typeof db.transaction;
+ try{
+  assert.equal(await rateAdmission([{key:'synthetic',...RATE_LIMITS.public}]),true);
+  assert.equal(statements[0],"SET LOCAL lock_timeout='3s'");assert.equal(statements[1],"SET LOCAL statement_timeout='3s'");assert.match(statements[2],/INSERT INTO tollbooth_security_rate_limits/);
+ }finally{db.transaction=original;}
+});
 test('rate limiting denies work when shared storage fails',async()=>{
  const original=db.execute;
  db.execute=(async()=>{throw new Error('synthetic outage')}) as unknown as typeof db.execute;

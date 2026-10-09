@@ -15,6 +15,7 @@ function postgresDb() {
     connectionString: url,
     max: 2,
     connectionTimeoutMillis: 10_000,
+    query_timeout: 10_000,
     idleTimeoutMillis: 30_000,
   });
   if (pool.listenerCount("error") === 0) {

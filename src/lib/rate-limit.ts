@@ -22,5 +22,9 @@ export async function rateLimit(key:string,{limit,windowMs}:RateLimit,executor:P
 }
 
 export async function rateAdmission(budgets:Array<{key:string;limit:number;windowMs:number}>):Promise<boolean>{
- try{return await transactionDb().transaction(async tx=>{for(const {key,...config} of budgets)if(!(await rateLimit(key,config,tx)).ok)throw new Error('Admission denied');return true;});}catch{return false;}
+ try{return await transactionDb().transaction(async tx=>{
+  await tx.execute(sql`SET LOCAL lock_timeout='3s'`);
+  await tx.execute(sql`SET LOCAL statement_timeout='3s'`);
+  for(const {key,...config} of budgets)if(!(await rateLimit(key,config,tx)).ok)throw new Error('Admission denied');return true;
+ });}catch{return false;}
 }

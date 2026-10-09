@@ -7,7 +7,7 @@ import ts from 'typescript';
 test('Neon HTTP reads use the PostgreSQL adapter for rollback admission',()=>{
  const http={transaction:()=>{throw new Error('Neon HTTP does not support interactive transactions');}};
  const postgres={transaction:()=>true};let pools=0;
- class Pool{constructor(options){pools++;assert.equal(options.max,2);}listenerCount(){return 1;}}
+ class Pool{constructor(options){pools++;assert.equal(options.max,2);assert.equal(options.query_timeout,10000);}listenerCount(){return 1;}}
  const module={exports:{}};
  const stubs={
   '@neondatabase/serverless':{neon:()=>({})},
