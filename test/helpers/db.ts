@@ -57,6 +57,8 @@ export function sql(){
 export async function resetTestData(suite: Suite) {
   if (!hasDatabase()) return
   const db = sql()
+  await db.query("DO $$ BEGIN PERFORM pg_advisory_xact_lock(845036); CREATE TABLE IF NOT EXISTS tenants (id uuid PRIMARY KEY,status text NOT NULL,deleted_at timestamptz); END $$;");
+  await db.query("INSERT INTO tenants (id,status,deleted_at) VALUES ($1,'active',NULL) ON CONFLICT(id) DO UPDATE SET status='active',deleted_at=NULL",[suite.tenant]);
   for(const table of TENANT_TABLES)await db.query(`delete from ${table} where tenant_id=$1`,[suite.tenant]);
   await db.query('delete from tollbooth_idempotency_keys where tenant_id=$1',[suite.tenant]);
   await db.query('delete from tollbooth_events where id like $1',[`${suite.eventPrefix}%`]);

@@ -1,12 +1,12 @@
 import { redirect } from "next/navigation"
 import { headers } from "next/headers"
-import { auth, HANDSHAKE_URL } from "@/lib/auth"
+import { getAppSession, HANDSHAKE_URL } from "@/lib/auth"
 import { Logo } from "@/components/logo"
 import { product } from "@/product.config"
 import { SignInForm } from "./sign-in-form"
 
 export default async function SignInPage() {
-  if (await auth.api.getSession({ headers: await headers() })) redirect("/dashboard")
+  if (await getAppSession(await headers())) redirect("/dashboard")
   if (HANDSHAKE_URL) {
     const h = await headers()
     const origin = `${h.get("x-forwarded-proto") ?? "https"}://${h.get("x-forwarded-host") ?? h.get("host")}`

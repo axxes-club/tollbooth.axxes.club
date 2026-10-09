@@ -30,4 +30,10 @@ export const db: ReturnType<typeof neonDb> = usesNeon
   ? neonDb()
   : postgresDb() as unknown as ReturnType<typeof neonDb>;
 
+// Neon HTTP cannot run interactive transactions. Admission rollback needs the
+// existing bounded PostgreSQL pool even when normal reads use Neon HTTP.
+export function transactionDb(): typeof db {
+  return usesNeon ? postgresDb() as unknown as typeof db : db;
+}
+
 export { schema }

@@ -105,7 +105,7 @@ export function withApi<P = Record<string, never>>(
         throw fail(403, "insufficient_scope", `This API key is missing the ${options.scope} scope`)
       }
 
-      const limit = rateLimit(caller.apiKeyId, RATE_LIMITS[options.limit ?? (req.method === "GET" ? "read" : "write")])
+      const limit = await rateLimit(caller.apiKeyId, RATE_LIMITS[options.limit ?? (req.method === "GET" ? "read" : "write")])
       if (!limit.ok) {
         throw fail(429, "rate_limit_exceeded", "Too many requests. Slow down and retry shortly.", {
           "retry-after": String(Math.max(1, Math.ceil((limit.resetAt - Date.now()) / 1000))),

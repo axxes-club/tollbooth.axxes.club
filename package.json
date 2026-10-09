@@ -8,7 +8,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "npm run test:build && node --require ./test/register.cjs --test .test-build/test/*.test.js",
-    "test:build": "tsc -p tsconfig.test.json",
+    "test:build": "tsc -p tsconfig.test.json && mkdir -p .test-build/src/lib/security && cp src/lib/security/*.mjs .test-build/src/lib/security/",
     "test:watch": "npm run test:build && node --require ./test/register.cjs --test --watch .test-build/test/*.test.js",
     "check:fees": "node scripts/check-fees.mjs",
     "check:schema": "node scripts/check-schema.mjs",
