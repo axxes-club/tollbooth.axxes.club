@@ -15,6 +15,7 @@ function postgresDb() {
     connectionString: url,
     max: 2,
     connectionTimeoutMillis: 10_000,
+    query_timeout: 10_000,
     idleTimeoutMillis: 30_000,
   });
   if (pool.listenerCount("error") === 0) {
@@ -29,5 +30,11 @@ function postgresDb() {
 export const db: ReturnType<typeof neonDb> = usesNeon
   ? neonDb()
   : postgresDb() as unknown as ReturnType<typeof neonDb>;
+
+// Neon HTTP cannot run interactive transactions. Admission rollback needs the
+// existing bounded PostgreSQL pool even when normal reads use Neon HTTP.
+export function transactionDb(): typeof db {
+  return usesNeon ? postgresDb() as unknown as typeof db : db;
+}
 
 export { schema }

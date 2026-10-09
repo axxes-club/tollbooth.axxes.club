@@ -1,30 +1,30 @@
-import "server-only"
-
-// Fixed-window counter kept in module scope. Serverless isolates give per-instance
-// limits, which is enough to stop a runaway client and a credential-guessing loop.
-// Swap the Map for Redis/Upstash if you need a limit shared across regions.
-const buckets = new Map<string, { count: number; resetAt: number }>()
-
-export type RateLimit = { limit: number; windowMs: number }
-
-export const RATE_LIMITS = {
-  read: { limit: 300, windowMs: 60_000 },
-  write: { limit: 120, windowMs: 60_000 },
-} satisfies Record<string, RateLimit>
-
-export function rateLimit(key: string, { limit, windowMs }: RateLimit, now = Date.now()): RateLimitResult {
-  const bucket = buckets.get(key)
-  if (!bucket || bucket.resetAt <= now) {
-    buckets.set(key, { count: 1, resetAt: now + windowMs })
-    // Opportunistic sweep so a long-lived process can't accumulate dead keys.
-    if (buckets.size > 5_000) {
-      for (const [k, v] of buckets) if (v.resetAt <= now) buckets.delete(k)
-    }
-    return { ok: true, limit, remaining: limit - 1, resetAt: now + windowMs }
-  }
-  bucket.count += 1
-  const remaining = Math.max(0, limit - bucket.count)
-  return { ok: bucket.count <= limit, limit, remaining, resetAt: bucket.resetAt }
+import "server-only";
+import {createHash} from "node:crypto";
+import {sql} from "drizzle-orm";
+import {db,transactionDb} from "./db";
+export type RateLimit={limit:number;windowMs:number};
+export type RateLimitResult={ok:boolean;limit:number;remaining:number;resetAt:number};
+export const RATE_LIMITS={read:{limit:300,windowMs:60000},write:{limit:120,windowMs:60000},public:{limit:10,windowMs:60000}};
+export async function rateLimit(key:string,{limit,windowMs}:RateLimit,executor:Pick<typeof db,"execute">=db):Promise<RateLimitResult>{
+ const denied={ok:false,limit,remaining:0,resetAt:Date.now()+windowMs};
+ try{
+  const identity=createHash("sha256").update(key).digest("hex");
+  const result=await executor.execute(sql`WITH cleanup AS (DELETE FROM tollbooth_security_rate_limits WHERE reset_at < CURRENT_TIMESTAMP - INTERVAL '1 hour' AND key <> ${identity} AND key IN (SELECT key FROM tollbooth_security_rate_limits WHERE reset_at < CURRENT_TIMESTAMP - INTERVAL '1 hour' AND key <> ${identity} LIMIT 20) RETURNING key)
+   INSERT INTO tollbooth_security_rate_limits (key,count,reset_at)
+   VALUES (${identity},1,CURRENT_TIMESTAMP + (${windowMs}::bigint * INTERVAL '1 millisecond'))
+   ON CONFLICT(key) DO UPDATE SET count=CASE WHEN tollbooth_security_rate_limits.reset_at<=CURRENT_TIMESTAMP THEN 1 ELSE LEAST(tollbooth_security_rate_limits.count,${limit})+1 END,
+   reset_at=CASE WHEN tollbooth_security_rate_limits.reset_at<=CURRENT_TIMESTAMP THEN EXCLUDED.reset_at ELSE tollbooth_security_rate_limits.reset_at END
+   RETURNING count,reset_at`);
+  const row=result.rows[0] as {count:number;reset_at:string}|undefined;
+  if(!row)return denied;
+  return {ok:row.count<=limit,limit,remaining:Math.max(0,limit-row.count),resetAt:new Date(row.reset_at).getTime()};
+ }catch{return denied;}
 }
 
-export type RateLimitResult = { ok: boolean; limit: number; remaining: number; resetAt: number }
+export async function rateAdmission(budgets:Array<{key:string;limit:number;windowMs:number}>):Promise<boolean>{
+ try{return await transactionDb().transaction(async tx=>{
+  await tx.execute(sql`SET LOCAL lock_timeout='3s'`);
+  await tx.execute(sql`SET LOCAL statement_timeout='3s'`);
+  for(const {key,...config} of budgets)if(!(await rateLimit(key,config,tx)).ok)throw new Error('Admission denied');return true;
+ });}catch{return false;}
+}

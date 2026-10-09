@@ -2,8 +2,8 @@
 
 import { cookies, headers } from "next/headers"
 import { redirect } from "next/navigation"
-import { and, eq, isNull, ne } from "drizzle-orm"
-import { auth } from "@/lib/auth"
+import { and, eq, isNull } from "drizzle-orm"
+import { getAppSession } from "@/lib/auth"
 import { db, schema } from "@/lib/db"
 import { ORG_COOKIE } from "@/lib/context"
 
@@ -18,7 +18,7 @@ export async function switchOrganization(tenantId: string): Promise<{ error?: st
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId)) {
     return { error: "Invalid organization." }
   }
-  const session = await auth.api.getSession({ headers: await headers() })
+  const session = await getAppSession(await headers())
   if (!session?.user) return { error: "Please sign in again to switch organization." }
 
   const [membership] = await db
@@ -31,8 +31,7 @@ export async function switchOrganization(tenantId: string): Promise<{ error?: st
         eq(schema.tenantMemberships.tenantId, tenantId),
         isNull(schema.tenantMemberships.deletedAt),
         isNull(schema.tenants.deletedAt),
-        ne(schema.tenants.status, "suspended"),
-        ne(schema.tenants.status, "cancelled"),
+        eq(schema.tenants.status, "active"),
       ),
     )
     .limit(1)

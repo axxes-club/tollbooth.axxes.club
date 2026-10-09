@@ -1,3 +1,4 @@
+import {tenantActive} from "@/lib/tenant-admission"
 import "server-only"
 import { createHash, randomBytes, timingSafeEqual } from "crypto"
 import { and, eq, isNull } from "drizzle-orm"
@@ -76,6 +77,7 @@ export async function authenticateApiKey(req: Request): Promise<ApiCaller | null
     .from(schema.tollboothApiKeys)
     .where(and(eq(schema.tollboothApiKeys.keyHash, hash(token.key)), isNull(schema.tollboothApiKeys.revokedAt)))
   if (!row || row.mode !== token.mode) return null
+  if (!(await tenantActive(row.tenantId))) return null
 
   // Fire-and-forget: a stale `last used` is never worth blocking a request for.
   db.update(schema.tollboothApiKeys)

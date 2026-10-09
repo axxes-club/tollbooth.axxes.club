@@ -2,8 +2,8 @@ import "server-only"
 import { cache } from "react"
 import { cookies, headers } from "next/headers"
 import { redirect } from "next/navigation"
-import { and, desc, eq, isNull, ne } from "drizzle-orm"
-import { auth } from "@/lib/auth"
+import { and, desc, eq, isNull } from "drizzle-orm"
+import { getAppSession } from "@/lib/auth"
 import { db, schema } from "@/lib/db"
 
 export type Membership = {
@@ -52,8 +52,7 @@ export const listMemberships = cache(async (userId: string): Promise<Membership[
         eq(schema.tenantMemberships.userId, userId),
         isNull(schema.tenantMemberships.deletedAt),
         isNull(schema.tenants.deletedAt),
-        ne(schema.tenants.status, "suspended"),
-        ne(schema.tenants.status, "cancelled"),
+        eq(schema.tenants.status, "active"),
       ),
     )
     .orderBy(desc(schema.tenantMemberships.isPrimary))
@@ -77,7 +76,7 @@ export const listMemberships = cache(async (userId: string): Promise<Membership[
  * action goes through this, so all data access is organization-scoped.
  */
 export const getContext = cache(async (tenantHint?: string): Promise<AppContext | null> => {
-  const session = await auth.api.getSession({ headers: await headers() })
+  const session = await getAppSession(await headers())
   if (!session) return null
 
   const memberships = await listMemberships(session.user.id)
@@ -102,7 +101,7 @@ export const getContext = cache(async (tenantHint?: string): Promise<AppContext 
 })
 
 export async function requireContext(): Promise<AppContext> {
-  const session = await auth.api.getSession({ headers: await headers() })
+  const session = await getAppSession(await headers())
   if (!session) redirect("/sign-in")
   const ctx = await getContext()
   if (!ctx) redirect("/no-tenant")

@@ -1,3 +1,6 @@
+import {tenantActive} from "@/lib/tenant-admission";
+import {rateAdmission,RATE_LIMITS} from "@/lib/rate-limit";
+import {boundedJson,RequestBodyError} from "@/lib/bounded-json";
 import { NextResponse } from "next/server"
 import { and, eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db"
@@ -14,24 +17,24 @@ import { stripeMode } from "@/lib/stripe"
  */
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params
+  let body:Record<string,unknown>;
+  try{body=await boundedJson(req);}catch(error){return NextResponse.json({error:{message:"Invalid checkout request"}},{status:error instanceof RequestBodyError?error.status:400});}
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  if(email.length>254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return NextResponse.json({error:{message:"Enter a valid email address"}},{status:400});
 
   const [link] = await db.select().from(schema.tollboothLinks).where(eq(schema.tollboothLinks.slug, slug))
-  if (!link || !link.active) return NextResponse.json({ error: { message: "This payment link is no longer available" } }, { status: 404 })
+  if (!link || !link.active || !(await tenantActive(link.tenantId))) return NextResponse.json({ error: { message: "This payment link is no longer available" } }, { status: 404 })
 
   const [price] = link.priceId ? await db.select().from(schema.tollboothPrices).where(eq(schema.tollboothPrices.id, link.priceId)) : [null]
   if (!price || !price.active) return NextResponse.json({ error: { message: "This payment link is no longer available" } }, { status: 404 })
 
-  const body = await req.json().catch(() => ({}))
-  const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : ""
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return NextResponse.json({ error: { message: "Enter a valid email address" } }, { status: 400 })
-  }
-
-  const quantity = link.allowQuantity && Number.isInteger(body?.quantity) ? Math.min(99, Math.max(1, body.quantity)) : 1
+  const quantity = link.allowQuantity && typeof body.quantity==='number' && Number.isInteger(body.quantity) ? Math.min(99, Math.max(1, body.quantity)) : 1
 
   const [product] = price.productId
     ? await db.select().from(schema.tollboothProducts).where(eq(schema.tollboothProducts.id, price.productId))
     : [null]
+
+  if(!(await rateAdmission([{key:"public-checkout-global",limit:600,windowMs:60000},{key:`public-checkout:${slug}`,...RATE_LIMITS.public}])))return NextResponse.json({error:{message:"Too many checkout attempts. Try again later."}},{status:429});
 
   const [customer] = await db
     .select()

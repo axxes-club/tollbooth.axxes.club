@@ -1,0 +1,23 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {runInNewContext} from 'node:vm';
+import ts from 'typescript';
+import {betterAuth} from 'better-auth';
+import {hashPassword,verifyPassword} from 'better-auth/crypto';
+import {memoryAdapter} from 'better-auth/adapters/memory';
+test('the configured satellite handler rejects direct canonical email enrollment',async()=>{
+ let captured;
+ const stub=new Proxy(function(){return stub;},{get:(_t,key)=>key==='__esModule'?false:stub});
+ const module={exports:{}};
+ const source=ts.transpileModule(readFileSync(process.env.ENROLLMENT_AUTH_SOURCE||'src/lib/auth.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText;
+ runInNewContext(source,{module,exports:module.exports,console,process:{env:{}},require:(name)=>name==='better-auth'?{betterAuth:options=>{captured=options;return stub;}}:name==='better-auth/crypto'?{hashPassword,verifyPassword}:stub,Headers,URL});
+ assert.ok(captured,'actual auth factory must be captured');
+ const data={user:[],account:[],session:[],verification:[]};
+ const auth=betterAuth({...captured,database:memoryAdapter(data),plugins:[],baseURL:'https://satellite.example.test',trustedOrigins:['https://satellite.example.test'],secret:'synthetic-test-auth-secret-with-at-least-32-characters',advanced:undefined});
+ const response=await auth.handler(new Request('https://satellite.example.test/api/auth/sign-up/email',{method:'POST',headers:{origin:'https://satellite.example.test','content-type':'application/json'},body:JSON.stringify({name:'Synthetic',email:'synthetic@example.test',password:'Synthetic-password-12345'})}));
+ assert.equal(response.status,404,'native signup must be a disabled endpoint');
+ assert.equal(data.user.length,0);assert.equal(data.account.length,0);assert.equal(data.session.length,0);
+ assert.equal(captured.emailAndPassword.enabled,true,'existing credential sign-in remains enabled');
+ assert.equal(captured.emailAndPassword.disableSignUp,true);
+});

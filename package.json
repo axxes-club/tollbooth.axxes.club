@@ -8,7 +8,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "npm run test:build && node --require ./test/register.cjs --test .test-build/test/*.test.js",
-    "test:build": "tsc -p tsconfig.test.json",
+    "test:build": "tsc -p tsconfig.test.json && mkdir -p .test-build/src/lib/security && cp src/lib/security/*.mjs .test-build/src/lib/security/",
     "test:watch": "npm run test:build && node --require ./test/register.cjs --test --watch .test-build/test/*.test.js",
     "check:fees": "node scripts/check-fees.mjs",
     "check:schema": "node scripts/check-schema.mjs",
@@ -18,9 +18,9 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
-    "better-auth": "^1.4.19",
+    "better-auth": "1.6.33",
     "drizzle-orm": "^0.45.3",
-    "next": "16.3.6",
+    "next": "16.3.8",
     "pg": "8.23.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -36,5 +36,6 @@
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
     "typescript": "^5"
-  }
+  },
+  "overrides": {}
 }

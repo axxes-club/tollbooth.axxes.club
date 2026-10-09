@@ -62,7 +62,7 @@
         },
         {
           "name": "Initialize disposable financial test database",
-          "run": "psql -h 127.0.0.1 -U ci -d ci -v ON_ERROR_STOP=1 -f scripts/create-tables.sql",
+          "run": "psql -h 127.0.0.1 -U ci -d ci -v ON_ERROR_STOP=1 -f scripts/create-tables.sql -f scripts/security-rate-limits.sql",
           "env": {
             "PGPASSWORD": "ci"
           }
