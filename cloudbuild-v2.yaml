@@ -71,7 +71,7 @@
       "entrypoint": "sh",
       "args": [
         "-ec",
-        "docker run -d --rm --name financial-db -e POSTGRES_PASSWORD=financial-test-only postgres:17; trap \"docker stop financial-db\" EXIT; for i in $$(seq 1 60); do docker exec financial-db pg_isready -U postgres && break; sleep 1; done; docker exec -i financial-db psql -v ON_ERROR_STOP=1 -U postgres < scripts/create-tables.sql; docker run --rm --network container:financial-db -e DATABASE_URL=postgres://postgres:financial-test-only@127.0.0.1:5432/postgres ci-check:$BUILD_ID sh -ec \"rm -f .env .env.*; npm test\""
+        "docker run -d --rm --name financial-db -e POSTGRES_PASSWORD=financial-test-only postgres:17; trap \"docker stop financial-db\" EXIT; for i in $$(seq 1 60); do docker exec financial-db pg_isready -U postgres && break; sleep 1; done; docker exec -i financial-db psql -v ON_ERROR_STOP=1 -U postgres < scripts/create-tables.sql; docker exec -i financial-db psql -v ON_ERROR_STOP=1 -U postgres < scripts/security-rate-limits.sql; docker run --rm --network container:financial-db -e DATABASE_URL=postgres://postgres:financial-test-only@127.0.0.1:5432/postgres ci-check:$BUILD_ID sh -ec \"rm -f .env .env.*; npm test\""
       ]
     },
     {
