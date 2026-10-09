@@ -6,6 +6,19 @@ import { createPortal } from "react-dom"
 export type SuiteApp = { key: string; name: string; description?: string; tagline?: string; url: string; color?: string; status: string; workspaceLaunch?: boolean }
 const CATALOG = "https://members.axxes.club/api/axxes/products"
 
+/** Discovery is separate from direct operational access and account management. */
+export function launcherCatalogProduct(app: SuiteApp): SuiteApp | null {
+  if (!app || typeof app.key !== "string" || typeof app.name !== "string" || !["live", "beta"].includes(app.status)) return null
+  if (["manifest", "stock", "webmaster", "wm", "handshake", "account"].includes(app.key.toLowerCase())) return null
+  try {
+    const url = new URL(appLaunchUrl(app))
+    if (["manifest.axxes.club", "stock.axxes.app", "wm.axxes.app", "handshake.axxes.club"].includes(url.hostname)) return null
+  } catch { return null }
+  return { ...app, name: app.name.replace(/\bAXXES Pay\b/g, "Payments"),
+    description: app.description?.replace(/\bAXXES Pay\b/g, "Payments"),
+    tagline: app.tagline?.replace(/\bAXXES Pay\b/g, "Payments") }
+}
+
 export function appLaunchUrl(app: SuiteApp, tenantId?: string) {
   const url = new URL(app.url)
   if (url.protocol !== "https:" || url.username || url.password) throw new Error("Invalid app address")
@@ -81,9 +94,9 @@ export function AllAppsSwitcher({ tenantId, compact = false }: { tenantId?: stri
       .then(async response => { if (!response.ok) throw new Error(); return response.json() })
       .then(data => {
         if (!Array.isArray(data.products)) throw new Error()
-        setApps(data.products.filter((app: SuiteApp) => {
-          if (!app || typeof app.key !== "string" || typeof app.name !== "string" || !["live", "beta"].includes(app.status)) return false
-          try { appLaunchUrl(app); return true } catch { return false }
+        setApps(data.products.flatMap((app: SuiteApp) => {
+          const entry = launcherCatalogProduct(app)
+          return entry ? [entry] : []
         }))
       })
       .catch(() => { if (!abort.signal.aborted) setError("Could not load apps. Please try again.") })
